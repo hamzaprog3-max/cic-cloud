@@ -38,11 +38,10 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
     const body: any = await request.json().catch(() => ({}));
     const { prompt, pdfUrl, listContent, history, apiKey: clientApiKey } = body;
 
-    const fallbackKey = atob('QVEuQWI4Uk42THhwUVo2UmR5NVp3ZWVFWUJmNm5RS0J0TWdYeTlGRXd4cG8yTVNvcTRBdFE=');
-    const apiKey = (clientApiKey || env?.VITE_GEMINI_API_KEY || env?.GEMINI_API_KEY || fallbackKey).trim();
+    const apiKey = (clientApiKey || env?.GEMINI_API_KEY || env?.VITE_GEMINI_API_KEY || '').trim();
 
     if (!apiKey) {
-      return new Response(JSON.stringify({ error: 'NO_API_KEY' }), {
+      return new Response(JSON.stringify({ error: 'NO_API_KEY', message: 'API key not configured in environment' }), {
         status: 400,
         headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
       });
@@ -57,9 +56,37 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
 
     const parts: any[] = [];
 
-    // Optionally download PDF on server if under 8MB
+    // Optionally download PDF on server if under 8MB with comprehensive SSRF protection
     if (pdfUrl && !listContent) {
       try {
+        const parsedUrl = new URL(pdfUrl);
+        const host = parsedUrl.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+        
+        let isPrivate =
+          parsedUrl.protocol !== 'https:' ||
+          host === 'localhost' ||
+          host === '0.0.0.0' ||
+          host.endsWith('.local') ||
+          host.endsWith('.internal') ||
+          host.startsWith('127.') ||
+          host.startsWith('10.') ||
+          host.startsWith('192.168.') ||
+          host.startsWith('169.254.') ||
+          host === '::1' ||
+          host === '::';
+
+        if (!isPrivate) {
+          const match172 = host.match(/^172\.(\d+)\./);
+          if (match172) {
+            const octet = parseInt(match172[1], 10);
+            if (octet >= 16 && octet <= 31) isPrivate = true;
+          }
+        }
+
+        if (isPrivate) {
+          throw new Error('Invalid or restricted PDF URL');
+        }
+
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 10000);
         const pdfRes = await fetch(pdfUrl, { signal: controller.signal });

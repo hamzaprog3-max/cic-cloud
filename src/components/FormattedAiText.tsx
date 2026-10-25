@@ -8,6 +8,15 @@ interface FormattedAiTextProps {
   className?: string;
 }
 
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
 // Safely render LaTeX math expressions into HTML
 function renderMath(math: string, displayMode: boolean): string {
   try {
@@ -19,7 +28,7 @@ function renderMath(math: string, displayMode: boolean): string {
     });
   } catch (err) {
     console.warn("KaTeX rendering error:", err);
-    return `<span class="katex-error">${math}</span>`;
+    return `<span class="katex-error">${escapeHtml(math)}</span>`;
   }
 }
 
