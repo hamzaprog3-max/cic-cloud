@@ -19,6 +19,7 @@ import CategoryManager from "@/components/admin/CategoryManager";
 import AnnouncementManager from "@/components/admin/AnnouncementManager";
 import NotificationTemplateManager from "@/components/admin/NotificationTemplateManager";
 import { ScheduleManager } from "@/components/admin/ScheduleManager";
+import { AiProvidersManagerModal } from "@/components/admin/AiProvidersManagerModal";
 import AuditLog from "./AuditLog";
 import { ShieldAlert, Megaphone, Calendar } from "lucide-react";
 import { yearLabel } from "@/lib/year-context";
@@ -92,7 +93,6 @@ const AdminDashboard = () => {
   const [yearFilter, setYearFilter] = useState<string>("all");
   const [semesterFilter, setSemesterFilter] = useState<string>("all");
   const [showAiKeyDialog, setShowAiKeyDialog] = useState(false);
-  const [adminGeminiKey, setAdminGeminiKey] = useState(localStorage.getItem("admin_gemini_api_key") || "");
 
   const loadData = useCallback(async () => {
     const deptId = user.role === "moderator" ? user.departmentId : undefined;
@@ -1149,61 +1149,12 @@ const AdminDashboard = () => {
         {activeSection === "audit_logs" && isOwner && <AuditLog courses={courses} categories={categories} onUpdate={loadData} />}
       </div>
 
-      {/* Global AI Gemini Key Setting Dialog for Owner */}
+      {/* Global AI Multi-Provider & Fallback Manager Dialog for Owner */}
       {showAiKeyDialog && (
-        <Dialog open={showAiKeyDialog} onOpenChange={setShowAiKeyDialog}>
-          <DialogContent className="max-w-md bg-background/95 backdrop-blur-xl">
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2 font-display text-base">
-                <Sparkles className="w-4 h-4 text-primary" />
-                {lang === "ar" ? "مفتاح Google Gemini AI العام للموقع" : "Global Gemini AI Key"}
-              </DialogTitle>
-            </DialogHeader>
-            <div className="space-y-4 py-2">
-              <p className="text-xs text-muted-foreground leading-relaxed">
-                {lang === "ar"
-                  ? "عند حفظ هذا المفتاح، سيتمكن جميع الطلاب من الاستفادة من شرح وتلخيص المحاضرات والـ PDF بالذكاء الاصطناعي فورياً دون الحاجة لإدخال مفتاح من طرفهم."
-                  : "When saved, all students will be able to use AI lecture summaries and explanations directly."}
-              </p>
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold">{lang === "ar" ? "مفتاح Gemini API:" : "API Key:"}</label>
-                <Input
-                  type="password"
-                  placeholder="AIzaSy..."
-                  value={adminGeminiKey}
-                  onChange={(e) => setAdminGeminiKey(e.target.value)}
-                  className="bg-secondary/50 font-mono text-xs"
-                />
-              </div>
-              <p className="text-[11px] text-muted-foreground">
-                {lang === "ar" ? "احصل على مفتاح مجاني في ثوانٍ من: " : "Get a free key from: "}
-                <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-primary hover:underline font-semibold">
-                  Google AI Studio ↗
-                </a>
-              </p>
-              <div className="flex gap-2 pt-2">
-                <Button
-                  onClick={() => {
-                    if (adminGeminiKey.trim()) {
-                      localStorage.setItem("admin_gemini_api_key", adminGeminiKey.trim());
-                      toast.success(lang === "ar" ? "تم حفظ مفتاح AI العام بنجاح ✅" : "Global AI key saved ✅");
-                    } else {
-                      localStorage.removeItem("admin_gemini_api_key");
-                      toast.info(lang === "ar" ? "تمت إزالة المفتاح" : "Key removed");
-                    }
-                    setShowAiKeyDialog(false);
-                  }}
-                  className="flex-1 text-xs"
-                >
-                  {lang === "ar" ? "حفظ المفتاح" : "Save Key"}
-                </Button>
-                <Button variant="outline" onClick={() => setShowAiKeyDialog(false)} className="text-xs">
-                  {lang === "ar" ? "إلغاء" : "Cancel"}
-                </Button>
-              </div>
-            </div>
-          </DialogContent>
-        </Dialog>
+        <AiProvidersManagerModal
+          open={showAiKeyDialog}
+          onOpenChange={setShowAiKeyDialog}
+        />
       )}
     </div>
   );

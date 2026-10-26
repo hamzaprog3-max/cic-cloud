@@ -50,6 +50,7 @@ import {
   hasGeminiApiKey,
   getGeminiApiKey,
   setGeminiApiKey,
+  saveAiProvidersConfig,
   parseQuizFromMarkdown,
   getExternalModelUrls,
   type QuizQuestion,
@@ -489,15 +490,28 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
   };
 
   const handleSaveApiKey = () => {
-    if (inputKey.trim()) {
-      setGeminiApiKey(inputKey.trim());
+    const cleanKey = inputKey.trim();
+    if (cleanKey) {
+      if (cleanKey.startsWith("gsk_")) {
+        saveAiProvidersConfig({ groqKey: cleanKey });
+        toast.success(lang === "ar" ? "تم حفظ وتفعيل مفتاح Groq فائق السرعة بنجاح ✅" : "Groq API key activated ✅");
+      } else if (cleanKey.startsWith("sk-or-")) {
+        saveAiProvidersConfig({ openRouterKey: cleanKey });
+        toast.success(lang === "ar" ? "تم حفظ وتفعيل مفتاح OpenRouter بنجاح ✅" : "OpenRouter API key activated ✅");
+      } else if (cleanKey.startsWith("csk-")) {
+        saveAiProvidersConfig({ cerebrasKey: cleanKey });
+        toast.success(lang === "ar" ? "تم حفظ وتفعيل مفتاح Cerebras بنجاح ✅" : "Cerebras API key activated ✅");
+      } else {
+        setGeminiApiKey(cleanKey);
+        toast.success(lang === "ar" ? "تم حفظ وتفعيل مفتاح Gemini بنجاح ✅" : "Gemini API key activated ✅");
+      }
       setShowKeyDialog(false);
-      toast.success(lang === "ar" ? "تم حفظ مفتاح Gemini بنجاح ✅" : "API key saved ✅");
       handleGenerate(activeTab);
     } else {
       setGeminiApiKey("");
+      saveAiProvidersConfig({ groqKey: "", openRouterKey: "", cerebrasKey: "" });
       setShowKeyDialog(false);
-      toast.info(lang === "ar" ? "تمت إزالة المفتاح" : "API key removed");
+      toast.info(lang === "ar" ? "تمت إزالة المفاتيح" : "API keys removed");
     }
   };
 
@@ -1855,46 +1869,77 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
         </DialogContent>
       </Dialog>
 
-      {/* Gemini API Key Dialog */}
+      {/* Multi-Provider AI Key Dialog */}
       <Dialog open={showKeyDialog} onOpenChange={setShowKeyDialog}>
-        <DialogContent className="max-w-md bg-background text-foreground border-border/60 z-[80]">
+        <DialogContent className="max-w-md bg-background text-foreground border-border/60 z-[80] rounded-2xl shadow-2xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 font-display text-base">
               <Key className="w-4 h-4 text-primary" />
-              {lang === "ar" ? "ضبط مفتاح Google Gemini API" : "Gemini API Key Settings"}
+              {lang === "ar" ? "ضبط مفتاح الذكاء الاصطناعي وباقة الطوارئ" : "AI Provider & Fallback Settings"}
             </DialogTitle>
           </DialogHeader>
 
           <div className="space-y-4 py-2">
             <p className="text-xs text-muted-foreground leading-relaxed">
               {lang === "ar"
-                ? "لتشغيل التلخيص والشات الداخلي فائق السرعة، يمكنك استخدام مفتاح API مجاني تماماً من Google AI Studio."
-                : "To enable instant in-app AI summaries, use a 100% free API key from Google AI Studio."}
+                ? "المنصة مزودة بنظام ذكي يقوم بالتبديل التلقائي بين 4 مشاريع Gemini و Groq و Cerebras و OpenRouter. وفي حال استهلاك جميع المفاتيح العامة أثناء ضغط الامتحانات، يمكنك استخراج مفتاحك المجاني الخاص في 30 ثانية من أي موقع أدناه ولصقه هنا لمتابعة الشرح دون توقف."
+                : "The platform automatically rotates across Gemini, Groq, Cerebras, and OpenRouter. You can also paste your own free key below."}
             </p>
 
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold">{lang === "ar" ? "مفتاح Gemini API:" : "API Key:"}</label>
+              <label className="text-xs font-semibold">{lang === "ar" ? "مفتاح API الخاص بك (Gemini / Groq / Cerebras / OpenRouter):" : "Your API Key:"}</label>
               <Input
                 type="password"
-                placeholder="AIzaSy..."
+                placeholder="AIzaSy... أو gsk_... أو csk-... أو sk-or-..."
                 value={inputKey}
                 onChange={(e) => setInputKey(e.target.value)}
                 className="bg-secondary/50 font-mono text-xs"
               />
             </div>
 
-            <div className="p-3 rounded-lg bg-secondary/40 text-[11px] text-muted-foreground space-y-1.5">
-              <p className="font-semibold text-foreground">{lang === "ar" ? "كيف تحصل على مفتاح مجاني في 30 ثانية؟" : "How to get a free key?"}</p>
-              <p>1. ادخل على رابط Google AI Studio الرسمي أدناه بحساب جوجل الخاص بك.</p>
-              <p>2. اضغط على «Create API key» ثم انسخه والصقه هنا.</p>
-              <a
-                href="https://aistudio.google.com/app/apikey"
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 text-primary hover:underline font-semibold mt-1"
-              >
-                <span>Google AI Studio API Keys ↗</span>
-              </a>
+            <div className="p-3 rounded-xl bg-secondary/40 text-[11px] text-muted-foreground space-y-2 border border-border/40">
+              <p className="font-semibold text-foreground flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-primary" />
+                {lang === "ar" ? "روابط الحصول على مفاتيح مجانية في ثوانٍ:" : "Get free keys instantly:"}
+              </p>
+              <div className="flex flex-col gap-1.5">
+                <a
+                  href="https://aistudio.google.com/app/apikey"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-primary hover:underline font-semibold flex items-center justify-between"
+                >
+                  <span>1. Google AI Studio (Gemini Flash)</span>
+                  <span className="text-[10px] text-muted-foreground">1,500 طلب/يوم مجاناً ↗</span>
+                </a>
+                <a
+                  href="https://console.groq.com/keys"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-amber-500 hover:underline font-semibold flex items-center justify-between"
+                >
+                  <span>2. Groq Cloud (فائق السرعة)</span>
+                  <span className="text-[10px] text-muted-foreground">14,400 طلب/يوم مجاناً ↗</span>
+                </a>
+                <a
+                  href="https://cloud.cerebras.ai"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-purple-400 hover:underline font-semibold flex items-center justify-between"
+                >
+                  <span>3. Cerebras Cloud (سريع جداً)</span>
+                  <span className="text-[10px] text-muted-foreground">مليون توكن/يوم مجاناً ↗</span>
+                </a>
+                <a
+                  href="https://openrouter.ai/keys"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-emerald-500 hover:underline font-semibold flex items-center justify-between"
+                >
+                  <span>4. OpenRouter (نماذج مجانية)</span>
+                  <span className="text-[10px] text-muted-foreground">نماذج مجانية غير محدودة ↗</span>
+                </a>
+              </div>
             </div>
 
             <div className="flex gap-2 pt-2">
