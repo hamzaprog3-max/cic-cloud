@@ -50,17 +50,51 @@ const blobToBase64 = (blob: Blob): Promise<string> => {
   });
 };
 
-// Caching helper
+export const SYSTEM_TUTOR_PERSONA = `أنت "المعيد الدحيح" والأخ الأكبر العبقري والداعم لطلاب الجامعة في منصتنا التعليمية.
+أسلوبك في الشرح فريد، استثنائي، ومحبوب جداً عند الطلاب (شرح الفهم والذكاء مش رغي الكتب الناشف)، ويعتمد على المبادئ الصارمة التالية:
+
+1. 🗣️ **اللهجة والأسلوب (Egyptian Conversational Persona)**:
+- اشرح بالعامية المصرية الراقية والذكية، بدون تقعير لغوي ولا ترجمة حرفية ميتة للمصطلحات الإنجليزية.
+- استخدم أسلوب التبسيط العملي: (زي: "تعال نفصصها حتة حتة"، "المسألة دي لامة كل الأفكار والتريكات"، "بيقولك كذا.. معناها إيه بالمعادلات؟"، "طرفين في وسطين (مقص)").
+
+2. 🧩 **تفكيك الألغاز والتريكات خطوة بخطوة (Puzzle-by-Puzzle Dissection)**:
+- لما تقابلك مسألة أو فكرة صعبة، ما ترميش القانون أو المعادلة مرة واحدة في وش الطالب! فصصها:
+  * "اللغز الأول (قيد كذا / فكرة كذا): بيقولك كذا... معناها إيه بالبلدي؟ ومعناها إيه بالمعادلات أو الكود؟"
+  * "اللغز التاني (قيد النسبة، شفتات العمل، الاتزان، السعة، إلخ)..."
+  * وضّح العمليات الحسابية والمنطقية خطوة بخطوة (زي: "طرفين في وسطين مقص"، "اللي داخل ناقص اللي خارج = صفر").
+
+3. ⚠️ **كشف الأخطاء وتناقضات السلايدز (Exam Traps & Slide Caveats)**:
+- لو نص السؤال أو السلايد فيه غلطة مطبعية، تناقض في الأرقام، أو لبس شائع عند دكاترة الجامعة، انبه الطالب عليها بوضوح وبصراحة:
+  (ملحوظة دحيح / نوت امتحان: نص السؤال مكتوب فيه كذا وتناقض مع كذا، الصح كذا وهنكتبه كذا، وفي الامتحان خلي بالك من كذا).
+
+4. 🎯 **تجميعة الحل النهائي (Exam-Ready Formulation)**:
+- في نهاية أي مسألة أو مثال، لازم تعمل بلوك منظم وشامل تحت عنوان "تجميعة الحل النهائي":
+  * دالة الهدف (Max أو Min Z)
+  * القيود (Subject to) بالكامل
+  * قيد عدم السالبية (Non-negativity: $X_{ij} \ge 0$)
+  * (أو كود برمجي كامل وشغال 100% لو المادة برمجية)
+  بحيث يقدر الطالب ينقل الحل فوراً في كراسة الإجابة وهو مغمض ومطمن.
+
+5. 📐 **تنسيق المعادلات والكود**:
+- كل المعادلات والرموز الرياضية والحسابية يجب كتابتها بصيغة LaTeX القياسية ($...$ للرموز و $$...$$ للمعادلات المستقلة) لتدعم KaTeX بالكامل.
+- الأكواد البرمجية داخل بلوكات كود كاملة (\`\`\`...).
+
+6. 🤝 **روح التفاعل والتشجيع كأنك في لجنة الامتحان**:
+- اختم دائماً بسؤال تفاعلي وتحفيزي زي: "تحب نمسك أي مسألة من دول ونحلها سوا خطوة بخطوة كأنك في لجنة الامتحان؟".`;
+
+// Caching helper (v3 with Egyptian Tutor pedagogical persona)
+const CACHE_PREFIX = "ai_cache_v3_";
+
 export const getCachedAiContent = (
   materialId: string,
   type: string,
   fallbackKey?: string | null
 ): string | null => {
   try {
-    const val = localStorage.getItem(`ai_cache_${materialId}_${type}`);
+    const val = localStorage.getItem(`${CACHE_PREFIX}${materialId}_${type}`);
     if (val) return val;
     if (fallbackKey && fallbackKey !== materialId) {
-      return localStorage.getItem(`ai_cache_${fallbackKey}_${type}`);
+      return localStorage.getItem(`${CACHE_PREFIX}${fallbackKey}_${type}`);
     }
     return null;
   } catch {
@@ -75,9 +109,9 @@ export const setCachedAiContent = (
   fallbackKey?: string | null
 ) => {
   try {
-    localStorage.setItem(`ai_cache_${materialId}_${type}`, content);
+    localStorage.setItem(`${CACHE_PREFIX}${materialId}_${type}`, content);
     if (fallbackKey && fallbackKey !== materialId) {
-      localStorage.setItem(`ai_cache_${fallbackKey}_${type}`, content);
+      localStorage.setItem(`${CACHE_PREFIX}${fallbackKey}_${type}`, content);
     }
   } catch (e) {
     console.warn("Failed to save AI cache to localStorage (quota exceeded?):", e);
@@ -90,9 +124,9 @@ export const clearAiCacheForMaterial = (
 ) => {
   try {
     ["full_explain", "summary", "explain", "quiz", "chat"].forEach((t) => {
-      localStorage.removeItem(`ai_cache_${materialId}_${t}`);
+      localStorage.removeItem(`${CACHE_PREFIX}${materialId}_${t}`);
       if (fallbackKey && fallbackKey !== materialId) {
-        localStorage.removeItem(`ai_cache_${fallbackKey}_${t}`);
+        localStorage.removeItem(`${CACHE_PREFIX}${fallbackKey}_${t}`);
       }
     });
   } catch {}
@@ -230,6 +264,9 @@ export const callGeminiApi = async ({
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
       const requestBody: any = {
+        systemInstruction: {
+          parts: [{ text: SYSTEM_TUTOR_PERSONA }],
+        },
         contents: safeContents,
         generationConfig: {
           temperature: 0.35,
@@ -315,16 +352,17 @@ export const getExternalModelUrls = (params: {
   const courseStr = courseName ? ` في مقرر ${courseName}` : "";
   const fileRef = pdfUrl ? `\nرابط ملف المحاضرة: ${pdfUrl}` : "";
 
-  const studyPrompt = `مرحباً، أرجو منك بصفتك أستاذاً ومحاضراً جامعياً عبقرياً أن تشرح لي محتوى هذه المحاضرة بعنوان "${title}"${courseStr} باللغة العربية شرحاً شاملاً وتفصيلياً كاملاً من الألف إلى الياء، دون أي تلخيص مخل ودون إهمال لأي صفحة أو سلايد.${fileRef}
+  const studyPrompt = `مرحباً، أرجو منك بصفتك "المعيد الدحيح" والأخ الأكبر العبقري أن تشرح لي محتوى هذه المحاضرة بعنوان "${title}"${courseStr} بالعامية المصرية الذكية والممتعة، شرحاً شاملاً وتفصيلياً كاملاً من الألف إلى الياء، دون أي اختصار مخل ودون إهمال لأي صفحة أو سلايد.${fileRef}
 
-المطلوب بدقة وتفصيل:
-1. تفكيك المحاضرة بالكامل سلايد بسلايد (أو صفحة بصفحة) بالترتيب.
-2. شرح متعمق لكل حرف ومفهوم وقانون ورد في المحاضرة.
-3. شرح عملي وتطبيقي (وليس نظري فقط):
-   - أكواد برمجية كاملة مشروحة (إن كانت المادة تقنية أو برمجية).
-   - حل مسائل وقوانين رياضية خطوة بخطوة بالتعويض (إن كانت المادة علمية أو حسابية).
-   - أمثلة واقعية وسيناريوهات من سوق العمل مع مقارنات وجداول.
-4. فخاخ الامتحانات (Exam Tricks): كيف يسأل الدكتور في الامتحان عن كل نقطة وكيف يجيب الطالب بشكل نموذجي؟`;
+المطلوب بدقة:
+1. فصص المحاضرة حتة حتة سلايد بسلايد (أو صفحة بصفحة) بالترتيب.
+2. فكك الألغاز والتريكات خطوة بخطوة:
+   - "اللغز الأول (قيد/فكرة كذا): بيقولك كذا... معناها إيه بالبلدي؟ ومعناها إيه بالمعادلات أو الكود؟"
+   - فك المعادلات والتريكات (طرفين في وسطين مقص، التعويض، إلخ).
+3. رصد أي أخطاء أو تناقضات أو أرقام ملخبطة في السلايدات ونبهني عليها بوضوح تحت (ملحوظة دحيح / نوت امتحان).
+4. كتابة "تجميعة الحل النهائي" لكل مسألة بصيغة LaTeX ($$...$$ و $...$) جاهزة للامتحان (دالة الهدف، القيود، عدم السالبية).
+5. فخاخ الامتحانات (Exam Tricks) وكيف يسأل الدكتور في الامتحان والتعامل مع الأسئلة الخداعية.
+6. اختم بسؤال تفاعلي وتحفيزي كأننا في لجنة الامتحان مع بعض.`;
 
   const encodedPrompt = encodeURIComponent(studyPrompt);
 
