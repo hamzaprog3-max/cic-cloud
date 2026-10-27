@@ -38,6 +38,9 @@ import {
   Layers,
   Presentation,
   Search,
+  RotateCcw,
+  AlertTriangle,
+  CheckCircle2,
 } from "lucide-react";
 import { FormattedAiText } from "@/components/FormattedAiText";
 import { exportToWordDocument, exportToPdfPrint } from "@/lib/export-doc";
@@ -51,11 +54,35 @@ import {
   hasGeminiApiKey,
   getGeminiApiKey,
   setGeminiApiKey,
+  getAiProvidersConfig,
   saveAiProvidersConfig,
   parseQuizFromMarkdown,
   getExternalModelUrls,
+  DEFAULT_GEMINI_KEY,
+  DEFAULT_GEMINI_KEYS,
+  DEFAULT_GROQ_KEY,
+  DEFAULT_OPENROUTER_KEY,
+  DEFAULT_CEREBRAS_KEY,
   type QuizQuestion,
 } from "@/lib/gemini";
+
+// Helper to detect exact page/slide count from PDF file in milliseconds
+const detectPdfPageCount = async (pdfUrl?: string | null): Promise<number> => {
+  if (!pdfUrl) return 0;
+  try {
+    const res = await fetch(pdfUrl);
+    if (!res.ok) return 0;
+    const arrayBuffer = await res.arrayBuffer();
+    const rawText = new TextDecoder("latin1").decode(new Uint8Array(arrayBuffer));
+    const pageMatches = rawText.match(/\/Type\s*\/Page\b/g);
+    const countMatches = [...rawText.matchAll(/\/Count\s+(\d+)/g)].map((m) => parseInt(m[1], 10));
+    const maxCount = countMatches.length > 0 ? Math.max(...countMatches) : 0;
+    return Math.max(pageMatches ? pageMatches.length : 0, maxCount);
+  } catch (err) {
+    console.warn("Could not detect PDF page count:", err);
+    return 0;
+  }
+};
 import type { Material, Course } from "@/lib/store";
 import { playClickSfx } from "@/hooks/use-sfx";
 
@@ -123,11 +150,34 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
   // API Key Settings Modal
   const [showKeyDialog, setShowKeyDialog] = useState(false);
   const [showKeyPassword, setShowKeyPassword] = useState(false);
-  const [inputKey, setInputKey] = useState(() => localStorage.getItem("lms_gemini_api_key") || "");
+  const [selectedProvider, setSelectedProvider] = useState<"auto" | "groq" | "gemini" | "cerebras" | "openrouter">(() => {
+    return getAiProvidersConfig().preferredProvider || "auto";
+  });
+  const [inputKey, setInputKey] = useState(() => {
+    const custom = localStorage.getItem("lms_gemini_api_key");
+    if (custom) return custom;
+    const config = getAiProvidersConfig();
+    if (config.preferredProvider === "groq") return DEFAULT_GROQ_KEY;
+    if (config.preferredProvider === "cerebras") return DEFAULT_CEREBRAS_KEY;
+    if (config.preferredProvider === "openrouter") return DEFAULT_OPENROUTER_KEY;
+    return DEFAULT_GEMINI_KEY;
+  });
+  const [totalPdfPages, setTotalPdfPages] = useState<number>(0);
 
-  // Load cached content on open
+  // Load cached content and detect PDF page count on open
   useEffect(() => {
     if (!open) return;
+
+    if (material.pdf_url) {
+      detectPdfPageCount(material.pdf_url).then((count) => {
+        if (count > 0) setTotalPdfPages(count);
+      });
+    }
+
+    const currentConfig = getAiProvidersConfig();
+    if (currentConfig.preferredProvider) {
+      setSelectedProvider(currentConfig.preferredProvider);
+    }
 
     const cachedFullExplain = getCachedAiContent(material.id, "full_explain", material.pdf_url);
     const cachedSummary = getCachedAiContent(material.id, "summary", material.pdf_url);
@@ -253,31 +303,47 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
       const courseName = course?.name ? ` في مقرر ${course.name}` : "";
 
       if (type === "full_explain") {
-        prompt = `أنت "المعيد الدحيح" والأخ الأكبر العبقري والداعم لطلاب الجامعة في منصتنا التعليمية. مهمتك تفكيك وشرح هذه المحاضرة بعنوان "${material.title}"${courseName} بالكامل من أول سلايد وحتى آخر سلايد دون أي تلخيص مخل ودون إهمال لأي صفحة أو فكرة أو مسألة!
+        let detectedSlides = totalPdfPages;
+        if (!detectedSlides && material.pdf_url) {
+          detectedSlides = await detectPdfPageCount(material.pdf_url);
+          if (detectedSlides > 0) setTotalPdfPages(detectedSlides);
+        }
 
-🚨 قواعد وطريقة الشرح الإلزامية:
-1. 📚 شمولية وتغطية كاملة لكافة السلايدات (Comprehensive Slide-by-Slide):
-   - تتبع كافة شرائح المحاضرة الأصلية صفحة بصفحة وسلايد بسلايد (السلايد 1، السلايد 2، السلايد 3، السلايد 4، السلايد 5... وحتى آخر سلايد في المحاضرة بالكامل).
-   - ⚠️ ممنوع نهائياً التوقف عند 3 أو 4 شرائح فقط أو تجميع المحاضرة كلها في نقاط عامة! إذا كان ملف المحاضرة يحتوي على 10 أو 15 أو 25 سلايد، يجب شرح كل شريحة منها في قسم منفصل تماماً يحمل رقمها الفعلي:
-     ## 📄 السلايد [الرقم الفعلي]: [عنوان السلايد بالإنجليزية أو العربية]
+        const slideCountInstruction = detectedSlides > 0
+          ? `🚨 تنبيه إلزامي وحاسم جداً (Strict Slide Count Enforcement):
+ملف المحاضرة المرفق يحتوي بالضبط على عدد [${detectedSlides}] سلايد (شريحة)!
+مهمتك الإلزامية التي لا تقبل أي تجزئة أو تلخيص مخل هي تفكيك وشرح المحاضرة بالكامل بعدد شرائحها الـ ${detectedSlides} كاملة من الشريحة 1 وحتى الشريحة ${detectedSlides} دون استثناء أي شريحة ودون دمج شرائح!
+- ⚠️ ممنوع نهائياً التوقف عند 3 أو 4 شرائح!
+- ⚠️ ممنوع دمج شريحتين في قسم واحد!
+- يجب أن يكون لكل شريحة عنوان رئيسي منفصل يحمل رقمها الفعلي بدقة:
+## 📄 السلايد 1: [عنوان السلايد]
+## 📄 السلايد 2: [عنوان السلايد]
+...
+## 📄 السلايد ${detectedSlides}: [عنوان السلايد]
 
-2. لكل سلايد أو مسألة في المحاضرة، التزم بهذا الهيكل الممتع والعبقري:
+⚡ لتتمكن من شرح كافة الـ ${detectedSlides} شريحة بالكامل دون نفاذ الحد الأقصى للرموز (Tokens):
+اجعل تفكيك كل شريحة فائق التركيز والعمق ومباشراً وفق الهيكل التالي:`
+          : `🚨 تنبيه إلزامي وحاسم:
+يجب عليك فحص ملف الـ PDF المرفق وتتبع كافة شرائح وسلايدات المحاضرة بالكامل شريحة بشريحة (السلايد 1، 2، 3، 4...) دون أي توقف أو تلخيص مخل ودون دمج شرائح!
+- يجب ترقيم كل شريحة برقمها الفعلي:
+## 📄 السلايد [الرقم الفعلي]: [عنوان السلايد]
+
+⚡ اجعل تفكيك كل شريحة فائق التركيز والعمق لتغطية كافة شرائح المحاضرة كاملة حتى آخر سلايد وفق الهيكل التالي:`;
+
+        prompt = `أنت "المعيد الدحيح" والأخ الأكبر العبقري والداعم لطلاب الجامعة في منصتنا التعليمية. مهمتك تفكيك وشرح هذه المحاضرة بعنوان "${material.title}"${courseName} بالكامل لكافة السلايدات دون أي تلخيص مخل ودون إهمال لأي صفحة أو فكرة أو مسألة!
+
+${slideCountInstruction}
+1. لكل سلايد أو مسألة في المحاضرة، التزم بهذا الهيكل الممتع والعبقري:
    - 🔍 **فكرة السلايد بالبلدي في كلمتين**: توضيح الفكرة المحورية للسلايد بالعامية المصرية السلسة دون رغي أو تعقيد.
-   - 📌 **المعطيات والبيانات الأصلية للسلايد**: تفريغ دقيق لكل البيانات والأرقام والمصطلحات والرسومات المذكورة في السلايد.
+   - 📌 **المعطيات والبيانات الأصلية للسلايد**: تفريغ دقيق للبيانات والأرقام والمصطلحات والرسومات أو الكود في السلايد.
    - 🧩 **تفكيك الألغاز والتريكات حتة حتة (تعال نفصصها حتة حتة)**:
-     * إذا كانت المسألة رياضية أو بحوث عمليات أو حسابية:
-       - **اللغز الأول (قيد كذا / فكرة كذا)**: بيقولك "..." $\rightarrow$ معناها إيه بالبلدي؟ $\rightarrow$ معناها إيه بالمعادلات الرياضية؟
-       - **اللغز التاني (قيد النسبة، شفتات العمل، السعة، الاتزان، إلخ)**: مع فك التريكات الرياضية خطوة بخطوة (طرفين في وسطين مقص، التعويض، إلخ).
-     * إذا كانت المادة برمجية أو حاسوبية:
-       - فصص فكرة الكود بالبلدي، ثم اكتب الكود كاملاً مشروحاً سطراً بسطر مع ناتج التنفيذ (Output) وتريكات الـ Edge Cases.
-     * إذا كانت المادة نظرية أو إدارية:
-       - فصص المفاهيم المعقدة بأمثلة وتشابيه من الواقع وسوق العمل مع جداول مقارنة (|---|).
-   - ⚠️ **ملحوظة دحيح / كشف أخطاء وتناقضات السلايد (Exam Trap)**:
-     * انبه الطالب بذكاء لأي تضارب أو أرقام ملخبطة أو أخطاء مطبعية شائعة في السلايد، وكيف يتعامل معها في ورقة الامتحان.
-   - 🎯 **تجميعة الحل النهائي (نموذج إجابة الامتحان)**:
-     * حط تجميعة الحل الصافي الكامل والمنظم جداً (دالة الهدف، القيود Subject to، عدم السالبية Non-negativity، أو الكود النهائي الكامل) باستخدام صيغة LaTeX ($$...$$ و $...$) بحيث ينقله الطالب في ورقة امتحانه فوراً وهو مغمض ومطمن.
+     * إذا كانت المسألة رياضية أو حسابية: فك التريكات الرياضية خطوة بخطوة بالمعادلات ($...$ و $...$).
+     * إذا كانت المادة برمجية: فصص فكرة الكود واكتب الكود كاملاً مشروحاً مع ناتج التنفيذ والـ Edge Cases.
+     * إذا كانت المادة نظرية: أمثلة واقعية وجداول مقارنة.
+   - ⚠️ **ملحوظة دحيح / فخ الامتحان (Exam Trap)**: الأخطاء الشائعة وكيف يتعامل معها في ورقة الامتحان.
+   - 🎯 **تجميعة الحل النهائي (نموذج إجابة الامتحان)**: الحل الصافي والمنظم جداً أو الكود النهائي.
 
-3. في نهاية الشرح بالكامل، اختم بسؤال تفاعلي لطيف ومشجع (زي: "تحب نمسك أي مسألة من دول ونحلها سوا خطوة بخطوة كأنك في لجنة الامتحان؟").
+2. في نهاية الشرح بالكامل، اختم بسؤال تفاعلي لطيف ومشجع (زي: "تحب نمسك أي مسألة من دول ونحلها سوا خطوة بخطوة كأنك في لجنة الامتحان؟").
 
 ابدأ الآن تفصيص المحاضرة من أول سلايد لآخر سلايد بنفس هذه الطريقة الممتعة والدقيقة!`;
       } else if (type === "summary") {
@@ -499,30 +565,61 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
     setIsEditingExplanation(false);
   };
 
+  const handleSelectProvider = (prov: "auto" | "groq" | "gemini" | "cerebras" | "openrouter") => {
+    playClickSfx();
+    setSelectedProvider(prov);
+    if (prov === "groq") {
+      setInputKey(DEFAULT_GROQ_KEY);
+    } else if (prov === "gemini") {
+      setInputKey(DEFAULT_GEMINI_KEY);
+    } else if (prov === "cerebras") {
+      setInputKey(DEFAULT_CEREBRAS_KEY);
+    } else if (prov === "openrouter") {
+      setInputKey(DEFAULT_OPENROUTER_KEY);
+    } else if (prov === "auto") {
+      setInputKey(DEFAULT_GROQ_KEY || DEFAULT_GEMINI_KEY);
+    }
+  };
+
+  const handleResetToDefaultKey = () => {
+    playClickSfx();
+    if (selectedProvider === "groq") setInputKey(DEFAULT_GROQ_KEY);
+    else if (selectedProvider === "cerebras") setInputKey(DEFAULT_CEREBRAS_KEY);
+    else if (selectedProvider === "openrouter") setInputKey(DEFAULT_OPENROUTER_KEY);
+    else setInputKey(DEFAULT_GEMINI_KEY);
+    toast.success(lang === "ar" ? "تم وضع المفتاح الافتراضي الخاص بك لهذا النموذج بنجاح ✅" : "Default admin key applied ✅");
+  };
+
   const handleSaveApiKey = () => {
     const cleanKey = inputKey.trim();
-    if (cleanKey) {
-      if (cleanKey.startsWith("gsk_")) {
-        saveAiProvidersConfig({ groqKey: cleanKey });
-        toast.success(lang === "ar" ? "تم حفظ وتفعيل مفتاح Groq فائق السرعة بنجاح ✅" : "Groq API key activated ✅");
-      } else if (cleanKey.startsWith("sk-or-")) {
-        saveAiProvidersConfig({ openRouterKey: cleanKey });
-        toast.success(lang === "ar" ? "تم حفظ وتفعيل مفتاح OpenRouter بنجاح ✅" : "OpenRouter API key activated ✅");
-      } else if (cleanKey.startsWith("csk-")) {
-        saveAiProvidersConfig({ cerebrasKey: cleanKey });
-        toast.success(lang === "ar" ? "تم حفظ وتفعيل مفتاح Cerebras بنجاح ✅" : "Cerebras API key activated ✅");
-      } else {
-        setGeminiApiKey(cleanKey);
-        toast.success(lang === "ar" ? "تم حفظ وتفعيل مفتاح Gemini بنجاح ✅" : "Gemini API key activated ✅");
-      }
-      setShowKeyDialog(false);
-      handleGenerate(activeTab);
-    } else {
-      setGeminiApiKey("");
-      saveAiProvidersConfig({ groqKey: "", openRouterKey: "", cerebrasKey: "" });
-      setShowKeyDialog(false);
-      toast.info(lang === "ar" ? "تمت إزالة المفاتيح" : "API keys removed");
+    saveAiProvidersConfig({
+      preferredProvider: selectedProvider,
+      ...(cleanKey.startsWith("gsk_") ? { groqKey: cleanKey } : {}),
+      ...(cleanKey.startsWith("csk-") ? { cerebrasKey: cleanKey } : {}),
+      ...(cleanKey.startsWith("sk-or-") ? { openRouterKey: cleanKey } : {}),
+      ...(cleanKey && !cleanKey.startsWith("gsk_") && !cleanKey.startsWith("csk-") && !cleanKey.startsWith("sk-or-")
+        ? { geminiKeys: [cleanKey, ...DEFAULT_GEMINI_KEYS] }
+        : {}),
+    });
+
+    if (cleanKey && !cleanKey.startsWith("gsk_") && !cleanKey.startsWith("csk-") && !cleanKey.startsWith("sk-or-")) {
+      setGeminiApiKey(cleanKey);
     }
+
+    setShowKeyDialog(false);
+    const providerNameMap: Record<string, string> = {
+      auto: lang === "ar" ? "التبديل التلقائي الذكي بين الجميع" : "Smart Auto Rotation",
+      groq: "Groq Cloud (120B)",
+      gemini: "Google Gemini (4 مشاريع)",
+      cerebras: "Cerebras Cloud",
+      openrouter: "OpenRouter",
+    };
+    toast.success(
+      lang === "ar"
+        ? `تم حفظ وتفعيل نموذج [${providerNameMap[selectedProvider] || selectedProvider}] والمفتاح بنجاح! ✨`
+        : `Provider [${selectedProvider}] activated! ✨`
+    );
+    handleGenerate(activeTab, true);
   };
 
   const externalModels = getExternalModelUrls({
@@ -718,6 +815,11 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
                       <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/25">
                         {lang === "ar" ? "شامل وعملي 🔥" : "Complete & Practical"}
                       </span>
+                      {totalPdfPages > 0 && (
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/25">
+                          {lang === "ar" ? `${totalPdfPages} سلايد بالمحاضرة` : `${totalPdfPages} Slides`}
+                        </span>
+                      )}
                     </h3>
                     <p className="text-xs text-muted-foreground">
                       {lang === "ar"
@@ -917,6 +1019,37 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
                     </div>
                   ) : (
                     <div className="space-y-4">
+                      {/* Banner if cached explanation has fewer slides than PDF */}
+                      {totalPdfPages > 4 && parsedSlides.filter((s) => !s.isIntro).length > 0 && parsedSlides.filter((s) => !s.isIntro).length < totalPdfPages && (
+                        <div className="p-3.5 rounded-xl bg-amber-500/15 border border-amber-500/35 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                          <div className="flex items-start sm:items-center gap-2.5">
+                            <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5 sm:mt-0" />
+                            <div>
+                              <p className="font-bold text-amber-600 dark:text-amber-400">
+                                {lang === "ar"
+                                  ? `⚠️ تنبيه: الشرح المحفوظ حالياً يغطي (${parsedSlides.filter((s) => !s.isIntro).length}) فقط من أصل (${totalPdfPages}) سلايد في ملف المحاضرة!`
+                                  : `⚠️ Notice: Current explanation covers (${parsedSlides.filter((s) => !s.isIntro).length}) of (${totalPdfPages}) slides!`}
+                              </p>
+                              <p className="text-[11px] text-muted-foreground">
+                                {lang === "ar"
+                                  ? `اضغط الزر لشرح وتفكيك كل السلايدات الـ (${totalPdfPages}) بالكامل دون أي اختصار.`
+                                  : "Click to generate the exhaustive explanation for all slides."}
+                              </p>
+                            </div>
+                          </div>
+                          <Button
+                            size="sm"
+                            variant="default"
+                            onClick={() => handleGenerate("full_explain", true)}
+                            disabled={loading}
+                            className="h-8 text-xs font-bold gap-1.5 bg-amber-600 hover:bg-amber-700 text-white shrink-0 shadow-xs"
+                          >
+                            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+                            <span>{lang === "ar" ? `شرح الـ (${totalPdfPages}) سلايد كاملة 🚀` : `Explain All (${totalPdfPages}) Slides 🚀`}</span>
+                          </Button>
+                        </div>
+                      )}
+
                       {/* Search Bar & Quick Jump */}
                       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 p-2 rounded-xl bg-secondary/30 border border-border/40">
                         <div className="relative flex-1">
@@ -1894,26 +2027,97 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
           <div className="space-y-4 py-2">
             <p className="text-xs text-muted-foreground leading-relaxed">
               {lang === "ar"
-                ? "المنصة مزودة بنظام ذكي يقوم بالتبديل التلقائي بين 4 مشاريع Gemini و Groq و Cerebras و OpenRouter. وفي حال استهلاك جميع المفاتيح العامة أثناء ضغط الامتحانات، يمكنك استخراج مفتاحك المجاني الخاص في 30 ثانية من أي موقع أدناه ولصقه هنا لمتابعة الشرح دون توقف."
-                : "The platform automatically rotates across Gemini, Groq, Cerebras, and OpenRouter. You can also paste your own free key below."}
+                ? "اختر النموذج الذي تريده وسيقوم الموقع تلقائياً بوضع مفتاح الأدمن الافتراضي الخاص به، أو ضع مفتاحك الشخصي للطوارئ."
+                : "Select your preferred provider to automatically use its default key or paste your custom key."}
             </p>
 
+            {/* 1. Quick Model / Provider Selection Grid */}
             <div className="space-y-1.5">
+              <label className="text-xs font-semibold flex items-center justify-between">
+                <span>{lang === "ar" ? "1. اختر النموذج أو المزود المفضل:" : "1. Select Preferred Provider:"}</span>
+                <span className="text-[10px] text-muted-foreground">{lang === "ar" ? "(اضغط لاختياره ووضع مفتاحه)" : "(Click to select & prefill key)"}</span>
+              </label>
+
+              <div className="grid grid-cols-2 gap-2">
+                {[
+                  {
+                    id: "auto",
+                    name: lang === "ar" ? "التبديل التلقائي الذكي بين النماذج (Auto)" : "Smart Auto Rotation",
+                    desc: lang === "ar" ? "Gemini للـ PDF + Groq للشات والملخصات" : "Gemini for PDF + Groq for chat",
+                    badge: lang === "ar" ? "موصى به 🔥" : "Recommended",
+                    borderActive: "border-primary bg-primary/10 text-primary",
+                  },
+                  {
+                    id: "groq",
+                    name: "Groq Cloud (120B)",
+                    desc: lang === "ar" ? "14,400 طلب/يوم - فائق السرعة" : "14.4k req/day - Ultra Fast",
+                    badge: lang === "ar" ? "الأعلى كوتا" : "Highest Quota",
+                    borderActive: "border-amber-500 bg-amber-500/10 text-amber-500",
+                  },
+                  {
+                    id: "gemini",
+                    name: "Google Gemini (4 مشاريع)",
+                    desc: lang === "ar" ? "الأقوى لقراءة ملفات PDF بصرية" : "Best for Visual Multimodal PDF",
+                    badge: lang === "ar" ? "قراءة بصرية" : "Vision",
+                    borderActive: "border-blue-500 bg-blue-500/10 text-blue-500",
+                  },
+                  {
+                    id: "cerebras",
+                    name: "Cerebras Cloud",
+                    desc: lang === "ar" ? "أسرع معالج في العالم (120B)" : "World's Fastest Inference",
+                    badge: lang === "ar" ? "مليون توكن" : "1M Tokens",
+                    borderActive: "border-purple-500 bg-purple-500/10 text-purple-500",
+                  },
+                  {
+                    id: "openrouter",
+                    name: "OpenRouter",
+                    desc: lang === "ar" ? "بوابة النماذج المفتوحة" : "Open Router Gateway",
+                    badge: lang === "ar" ? "نماذج متعددة" : "Multiple Models",
+                    borderActive: "border-emerald-500 bg-emerald-500/10 text-emerald-500",
+                  },
+                ].map((prov) => {
+                  const isSelected = selectedProvider === prov.id;
+                  return (
+                    <button
+                      key={prov.id}
+                      type="button"
+                      onClick={() => handleSelectProvider(prov.id as any)}
+                      className={`p-2.5 rounded-xl border text-right transition-all flex flex-col justify-between gap-1.5 ${
+                        isSelected
+                          ? `${prov.borderActive} shadow-xs ring-1 ring-primary/40 font-semibold`
+                          : "border-border/50 bg-secondary/30 hover:border-border hover:bg-secondary/60 text-foreground"
+                      } ${prov.id === "auto" ? "col-span-2" : ""}`}
+                    >
+                      <div className="flex items-center justify-between w-full">
+                        <span className="text-xs font-bold flex items-center gap-1.5">
+                          {isSelected ? <Check className="w-3.5 h-3.5 shrink-0" /> : <div className="w-2.5 h-2.5 rounded-full border border-muted-foreground/60 shrink-0" />}
+                          <span>{prov.name}</span>
+                        </span>
+                        <span className="text-[9px] px-1.5 py-0.2 rounded-full font-bold bg-background/60 border border-border/40">
+                          {prov.badge}
+                        </span>
+                      </div>
+                      <span className="text-[10px] text-muted-foreground leading-tight">{prov.desc}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* 2. Key Input Field */}
+            <div className="space-y-1.5 pt-1">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-semibold">
-                  {lang === "ar" ? "مفتاح API الخاص بك (طوارئ الامتحانات):" : "Your Emergency API Key:"}
+                  {lang === "ar" ? "2. المفتاح المستخدم لهذا النموذج:" : "2. Active Key for this Provider:"}
                 </label>
-                {inputKey && (
-                  <span className="text-[10px] text-emerald-500 font-medium">
-                    {inputKey.startsWith("gsk_")
-                      ? "Groq Key"
-                      : inputKey.startsWith("csk-")
-                      ? "Cerebras Key"
-                      : inputKey.startsWith("sk-or-")
-                      ? "OpenRouter Key"
-                      : "Gemini Key"}
-                  </span>
-                )}
+                <button
+                  type="button"
+                  onClick={handleResetToDefaultKey}
+                  className="text-[10px] text-primary hover:underline font-semibold flex items-center gap-1"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>{lang === "ar" ? "استعادة مفتاح الأدمن الافتراضي" : "Reset to Admin Key"}</span>
+                </button>
               </div>
               <div className="relative">
                 <Input
@@ -1934,8 +2138,8 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
               </div>
               <p className="text-[10px] text-muted-foreground">
                 {lang === "ar"
-                  ? "💡 المنصة تعمل تلقائياً بمفاتيح السيرفر (Groq 120B و 4 مشاريع Gemini). لا تحتاج لإدخال مفتاح هنا إلا إذا أردت استخدام كوتا خاصة بك."
-                  : "💡 The platform works automatically. Only paste a personal key if you want your own custom quota."}
+                  ? "💡 تم وضع المفتاح الافتراضي الخاص بك تلقائياً عند النقر على أي نموذج أعلاه. يمكنك استخدامه كما هو أو استبداله."
+                  : "💡 Default admin key is automatically loaded upon clicking any model. You can keep it or replace it."}
               </p>
             </div>
 

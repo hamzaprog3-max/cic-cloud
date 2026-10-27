@@ -170,19 +170,35 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
 
         if (!isPrivate) {
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 12000);
+          const timeoutId = setTimeout(() => controller.abort(), 20000);
           const pdfRes = await fetch(pdfUrl, { signal: controller.signal });
           clearTimeout(timeoutId);
 
           if (pdfRes.ok) {
             const arrayBuffer = await pdfRes.arrayBuffer();
-            if (arrayBuffer.byteLength < 8 * 1024 * 1024) {
+            if (arrayBuffer.byteLength < 25 * 1024 * 1024) {
               const base64 = arrayBufferToBase64(arrayBuffer);
-              const contentType = pdfRes.headers.get('content-type') || 'application/pdf';
+              const contentType = (pdfRes.headers.get('content-type') || '').toLowerCase();
+              const isPdf = pdfUrl.toLowerCase().includes('.pdf') || contentType.includes('pdf') || !contentType.includes('image');
               pdfInlineData = {
-                mimeType: contentType.includes('pdf') ? 'application/pdf' : 'image/jpeg',
+                mimeType: isPdf ? 'application/pdf' : (contentType.includes('png') ? 'image/png' : 'image/jpeg'),
                 data: base64,
               };
+
+              // Automatic PDF Slide/Page Count Detection
+              try {
+                const rawText = new TextDecoder('latin1').decode(new Uint8Array(arrayBuffer));
+                const pageMatches = rawText.match(/\/Type\s*\/Page\b/g);
+                const countMatches = [...rawText.matchAll(/\/Count\s+(\d+)/g)].map((m) => parseInt(m[1], 10));
+                const maxCount = countMatches.length > 0 ? Math.max(...countMatches) : 0;
+                const detectedPages = Math.max(pageMatches ? pageMatches.length : 0, maxCount);
+                if (detectedPages > 0 && !prompt.includes(`[${detectedPages}]`)) {
+                  prompt = `🚨 تنبيه حاسم: تم فحص ملف المحاضرة المرفق وتبين أنه يحتوي بالضبط على [${detectedPages}] سلايد/صفحة!
+يجب عليك شرح وتفكيك كافة الشرائح الـ ${detectedPages} بالكامل من السلايد 1 وحتى السلايد ${detectedPages} دون استثناء أي شريحة ودون دمج شرائح!\n\n${prompt}`;
+                }
+              } catch (e) {
+                console.warn('Page count check skipped:', e);
+              }
             }
           }
         }
@@ -197,7 +213,7 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
     // A. Groq Candidates (Flagship 120B model prioritized)
     const groqCandidates: ProviderCandidate[] = [];
     if (groqKey) {
-      ['openai/gpt-oss-120b', 'qwen/qwen3.8-27b', 'allam-2-7b', 'llama-3.3-70b-versatile'].forEach((model) => {
+      ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768', 'gemma2-9b-it', 'deepseek-r1-distill-llama-70b'].forEach((model) => {
         groqCandidates.push({
           name: `Groq_${model}`,
           type: 'openai_compatible',
@@ -208,10 +224,10 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
       });
     }
 
-    // B. Cerebras Candidates (120B wafer-scale model prioritized)
+    // B. Cerebras Candidates (Ultra-fast 70B & 8B models prioritized)
     const cerebrasCandidates: ProviderCandidate[] = [];
     if (cerebrasKey) {
-      ['gpt-oss-120b', 'qwen-3.8-27b', 'llama3.1-70b'].forEach((model) => {
+      ['llama3.3-70b', 'llama3.1-70b', 'llama3.1-8b'].forEach((model) => {
         cerebrasCandidates.push({
           name: `Cerebras_${model}`,
           type: 'openai_compatible',
@@ -224,7 +240,7 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
 
     // C. Gemini Key Rotation (4 projects)
     const geminiCandidates: ProviderCandidate[] = [];
-    const geminiModels = ['gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.5-flash', 'gemini-2.0-flash'];
+    const geminiModels = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-pro'];
     allGeminiKeys.forEach((key, keyIdx) => {
       geminiModels.forEach((model) => {
         geminiCandidates.push({
@@ -240,7 +256,12 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
     // D. OpenRouter Free Models
     const openRouterCandidates: ProviderCandidate[] = [];
     if (openRouterKey) {
-      ['nvidia/nemotron-3.5-lightning:free', 'google/gemma-4-26b-a4b-it:free', 'deepseek/deepseek-chat:free'].forEach((model) => {
+      [
+        'google/gemini-2.0-flash-exp:free',
+        'meta-llama/llama-3.3-70b-instruct:free',
+        'deepseek/deepseek-chat:free',
+        'qwen/qwen-2.5-72b-instruct:free',
+      ].forEach((model) => {
         openRouterCandidates.push({
           name: `OpenRouter_${model}`,
           type: 'openai_compatible',
@@ -256,9 +277,9 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
     }
 
     // Candidate Priority:
-    // If inline visual PDF data is present, Gemini starts first.
+    // If a PDF file is present (or downloaded inline), Gemini starts first to see all visual slides!
     // Otherwise, start immediately with Groq 120B (the strongest model), followed by Cerebras 120B!
-    if (pdfInlineData) {
+    if (pdfInlineData || pdfUrl) {
       candidates.push(...geminiCandidates, ...groqCandidates, ...cerebrasCandidates, ...openRouterCandidates);
     } else {
       candidates.push(...groqCandidates, ...cerebrasCandidates, ...geminiCandidates, ...openRouterCandidates);

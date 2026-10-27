@@ -350,7 +350,7 @@ export const testAiProvider = async (
     const testPrompt = "أجب بكلمة 'شغال' فقط لتأكيد الاتصال.";
 
     if (providerType === "gemini") {
-      const targetModel = model || "gemini-3.1-flash-lite";
+      const targetModel = model || "gemini-2.0-flash";
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent?key=${cleanKey}`;
       const res = await fetch(url, {
         method: "POST",
@@ -373,7 +373,7 @@ export const testAiProvider = async (
     }
 
     if (providerType === "groq") {
-      const targetModel = model || "openai/gpt-oss-120b";
+      const targetModel = model || "llama-3.3-70b-versatile";
       const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -399,7 +399,7 @@ export const testAiProvider = async (
     }
 
     if (providerType === "openrouter") {
-      const targetModel = model || "nvidia/nemotron-3.5-lightning:free";
+      const targetModel = model || "meta-llama/llama-3.3-70b-instruct:free";
       const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -424,7 +424,7 @@ export const testAiProvider = async (
     }
 
     if (providerType === "cerebras") {
-      const targetModel = model || "gpt-oss-120b";
+      const targetModel = model || "llama3.3-70b";
       const res = await fetch("https://api.cerebras.ai/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -520,10 +520,11 @@ export const callGeminiApi = async ({
 
       if (res.ok) {
         const blob = await res.blob();
-        if (blob.size < 15 * 1024 * 1024) {
+        if (blob.size < 25 * 1024 * 1024) {
           const base64 = await blobToBase64(blob);
+          const isPdf = pdfUrl.toLowerCase().includes(".pdf") || blob.type.toLowerCase().includes("pdf") || !blob.type.includes("image");
           pdfInlineData = {
-            mimeType: blob.type.includes("pdf") ? "application/pdf" : "image/jpeg",
+            mimeType: isPdf ? "application/pdf" : (blob.type.includes("png") ? "image/png" : "image/jpeg"),
             data: base64,
           };
         }
@@ -534,10 +535,10 @@ export const callGeminiApi = async ({
   }
 
   // 3. Build Direct Client-Side Fallback Chain across all providers
-  // Prioritizing the strongest 120-Billion parameter models (Groq & Cerebras openai/gpt-oss-120b)
+  // Prioritizing the highest-quota and strongest models: Groq (Llama 3.3 70B @ 14,400 req/day) & Gemini 2.0 Flash / 1.5 Flash
   const groqCandidates: ProviderCandidate[] = [];
   if (config.groqKey) {
-    ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "allam-2-7b", "llama-3.3-70b-versatile"].forEach((model) => {
+    ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768", "gemma2-9b-it", "deepseek-r1-distill-llama-70b"].forEach((model) => {
       groqCandidates.push({
         name: `Groq_${model}`,
         type: "openai_compatible",
@@ -550,7 +551,7 @@ export const callGeminiApi = async ({
 
   const cerebrasCandidates: ProviderCandidate[] = [];
   if (config.cerebrasKey) {
-    ["gpt-oss-120b", "qwen-3.8-27b", "llama3.1-70b"].forEach((model) => {
+    ["llama3.3-70b", "llama3.1-70b", "llama3.1-8b"].forEach((model) => {
       cerebrasCandidates.push({
         name: `Cerebras_${model}`,
         type: "openai_compatible",
@@ -562,7 +563,7 @@ export const callGeminiApi = async ({
   }
 
   const geminiCandidates: ProviderCandidate[] = [];
-  const geminiModels = ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-flash-latest", "gemini-3.5-flash", "gemini-2.0-flash"];
+  const geminiModels = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.0-flash-lite", "gemini-1.5-pro"];
   config.geminiKeys.forEach((key, keyIdx) => {
     geminiModels.forEach((model) => {
       geminiCandidates.push({
@@ -578,9 +579,10 @@ export const callGeminiApi = async ({
   const openRouterCandidates: ProviderCandidate[] = [];
   if (config.openRouterKey) {
     [
-      "nvidia/nemotron-3.5-lightning:free",
-      "google/gemma-4-26b-a4b-it:free",
+      "google/gemini-2.0-flash-exp:free",
+      "meta-llama/llama-3.3-70b-instruct:free",
       "deepseek/deepseek-chat:free",
+      "qwen/qwen-2.5-72b-instruct:free",
     ].forEach((model) => {
       openRouterCandidates.push({
         name: `OpenRouter_${model}`,
@@ -627,8 +629,8 @@ export const callGeminiApi = async ({
   // Routing priority:
   // If user selected explicit provider in settings, respect it.
   // In 'auto' mode:
-  // - If a raw PDF file was downloaded as binary, Gemini starts first for native vision.
-  // - For text, chat, explanations, quizzes, and summaries: start immediately with Groq 120B (the strongest model)!
+  // - If a raw PDF file is present (or downloaded as binary), Gemini starts first for native vision.
+  // - For text, chat, explanations, quizzes, and summaries without PDF: start immediately with Groq 120B (the strongest model)!
   if (config.preferredProvider === "gemini") {
     candidates.push(...geminiCandidates, ...groqCandidates, ...cerebrasCandidates, ...openRouterCandidates);
   } else if (config.preferredProvider === "groq") {
@@ -637,7 +639,7 @@ export const callGeminiApi = async ({
     candidates.push(...cerebrasCandidates, ...groqCandidates, ...geminiCandidates, ...openRouterCandidates);
   } else if (config.preferredProvider === "openrouter") {
     candidates.push(...openRouterCandidates, ...groqCandidates, ...cerebrasCandidates, ...geminiCandidates);
-  } else if (pdfInlineData) {
+  } else if (pdfInlineData || pdfUrl) {
     candidates.push(...geminiCandidates, ...groqCandidates, ...cerebrasCandidates, ...openRouterCandidates);
   } else {
     candidates.push(...groqCandidates, ...cerebrasCandidates, ...geminiCandidates, ...openRouterCandidates);
