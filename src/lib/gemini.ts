@@ -31,10 +31,10 @@ const fromHex = (h: string): string => {
 };
 
 export const DEFAULT_GEMINI_KEYS = [
-  fromHex("41512e416238524e364b465f5770513636477443305a64587239556d527368563758446f4b4e356c733269335664746379524e3767"),
-  fromHex("41512e416238524e364b4f766465695a62387143765f5939356656304a5a5632765f696862445a7130517a4d54304c556d59684867"),
-  fromHex("41512e416238524e364b6b5654626b4c734f6153716d4677737a4f66377054633064664671374d414f52566d69334e78722d366177"),
-  fromHex("41512e416238524e364c6872766c4a4e6647654470766d4342356d374167674a4f70474b6d3062463858796b75764d624373317441"),
+  fromHex("41512e416238524e364c6872766c4a4e6647654470766d4342356d374167674a4f70474b6d3062463858796b75764d624373317441"), // Key #1: User's primary Gemini key
+  fromHex("41512e416238524e364b465f5770513636477443305a64587239556d527368563758446f4b4e356c733269335664746379524e3767"), // Project 2
+  fromHex("41512e416238524e364b4f766465695a62387143765f5939356656304a5a5632765f696862445a7130517a4d54304c556d59684867"), // Project 3
+  fromHex("41512e416238524e364b6b5654626b4c734f6153716d4677737a4f66377054633064664671374d414f52566d69334e78722d366177"), // Project 4
 ];
 export const DEFAULT_GEMINI_KEY = DEFAULT_GEMINI_KEYS[0];
 export const DEFAULT_GROQ_KEY = fromHex("67736b5f35684e69495a37586d335a39725544444278316d57476479623346594171614d64515858615a575a546e716d414746394a434c7a");
@@ -350,7 +350,7 @@ export const testAiProvider = async (
     const testPrompt = "أجب بكلمة 'شغال' فقط لتأكيد الاتصال.";
 
     if (providerType === "gemini") {
-      const targetModel = model || "gemini-2.0-flash";
+      const targetModel = model || "gemini-3.8-flash";
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent?key=${cleanKey}`;
       const res = await fetch(url, {
         method: "POST",
@@ -373,7 +373,7 @@ export const testAiProvider = async (
     }
 
     if (providerType === "groq") {
-      const targetModel = model || "llama-3.3-70b-versatile";
+      const targetModel = model || "openai/gpt-oss-120b";
       const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -395,11 +395,11 @@ export const testAiProvider = async (
         const errJson = await res.json().catch(() => ({}));
         return { success: false, message: errJson?.error?.message || `خطأ HTTP ${res.status}`, durationMs };
       }
-      return { success: true, message: `Groq متصل بنجاح وسريع جداً! (${durationMs}ms)`, durationMs };
+      return { success: true, message: `Groq (120B) متصل بنجاح وسريع جداً! (${durationMs}ms)`, durationMs };
     }
 
     if (providerType === "openrouter") {
-      const targetModel = model || "meta-llama/llama-3.3-70b-instruct:free";
+      const targetModel = model || "nvidia/nemotron-3.5-lightning:free";
       const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -424,7 +424,7 @@ export const testAiProvider = async (
     }
 
     if (providerType === "cerebras") {
-      const targetModel = model || "llama3.3-70b";
+      const targetModel = model || "gpt-oss-120b";
       const res = await fetch("https://api.cerebras.ai/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -443,7 +443,7 @@ export const testAiProvider = async (
         const errJson = await res.json().catch(() => ({}));
         return { success: false, message: errJson?.error?.message || `خطأ HTTP ${res.status}`, durationMs };
       }
-      return { success: true, message: `Cerebras متصل بنجاح! (${durationMs}ms)`, durationMs };
+      return { success: true, message: `Cerebras (120B) متصل بنجاح! (${durationMs}ms)`, durationMs };
     }
 
     return { success: false, message: "نوع المزود غير مدعوم في الاختبار السريع", durationMs: 0 };
@@ -495,17 +495,9 @@ export const callGeminiApi = async ({
       }
     } else {
       const errJson = await proxyRes.json().catch(() => ({}));
-      if (errJson?.error === "RATE_LIMIT_EXCEEDED") {
-        throw new Error("RATE_LIMIT_EXCEEDED");
-      }
-      if (errJson?.error === "INVALID_API_KEY") {
-        throw new Error("INVALID_API_KEY");
-      }
+      console.warn("Serverless /api/gemini proxy returned error, falling back to direct client providers:", proxyRes.status, errJson);
     }
   } catch (proxyErr: any) {
-    if (proxyErr.message === "RATE_LIMIT_EXCEEDED" || proxyErr.message === "INVALID_API_KEY") {
-      throw proxyErr;
-    }
     console.warn("Serverless /api/gemini proxy bypassed, starting direct client fallback chain:", proxyErr);
   }
 
@@ -535,10 +527,10 @@ export const callGeminiApi = async ({
   }
 
   // 3. Build Direct Client-Side Fallback Chain across all providers
-  // Prioritizing the highest-quota and strongest models: Groq (Llama 3.3 70B @ 14,400 req/day) & Gemini 2.0 Flash / 1.5 Flash
+  // Prioritizing the highest-quota and strongest models: Groq (120B @ 14,400 req/day), Cerebras (120B), and Gemini 3.8 Flash
   const groqCandidates: ProviderCandidate[] = [];
   if (config.groqKey) {
-    ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768", "gemma2-9b-it", "deepseek-r1-distill-llama-70b"].forEach((model) => {
+    ["openai/gpt-oss-120b", "allam-2-7b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"].forEach((model) => {
       groqCandidates.push({
         name: `Groq_${model}`,
         type: "openai_compatible",
@@ -551,7 +543,7 @@ export const callGeminiApi = async ({
 
   const cerebrasCandidates: ProviderCandidate[] = [];
   if (config.cerebrasKey) {
-    ["llama3.3-70b", "llama3.1-70b", "llama3.1-8b"].forEach((model) => {
+    ["gpt-oss-120b", "qwen-3.8-27b"].forEach((model) => {
       cerebrasCandidates.push({
         name: `Cerebras_${model}`,
         type: "openai_compatible",
@@ -563,7 +555,7 @@ export const callGeminiApi = async ({
   }
 
   const geminiCandidates: ProviderCandidate[] = [];
-  const geminiModels = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.0-flash-lite", "gemini-1.5-pro"];
+  const geminiModels = ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-flash-latest", "gemini-3.1-flash-lite"];
   config.geminiKeys.forEach((key, keyIdx) => {
     geminiModels.forEach((model) => {
       geminiCandidates.push({
@@ -579,10 +571,10 @@ export const callGeminiApi = async ({
   const openRouterCandidates: ProviderCandidate[] = [];
   if (config.openRouterKey) {
     [
-      "google/gemini-2.0-flash-exp:free",
-      "meta-llama/llama-3.3-70b-instruct:free",
-      "deepseek/deepseek-chat:free",
-      "qwen/qwen-2.5-72b-instruct:free",
+      "nvidia/nemotron-3.5-lightning:free",
+      "nvidia/nemotron-3.5-super-vl:free",
+      "liquid/lfm-2.5-2.6b:free",
+      "thinkingmachines/inkling:free",
     ].forEach((model) => {
       openRouterCandidates.push({
         name: `OpenRouter_${model}`,

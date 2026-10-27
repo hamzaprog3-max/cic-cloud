@@ -80,10 +80,10 @@ export default async function handler(req: any, res: any) {
     // Default verified keys from 4 distinct projects + Groq + OpenRouter + Cerebras (hex-encoded)
     const fromHex = (h: string): string => h.match(/.{1,2}/g)?.map((b) => String.fromCharCode(parseInt(b, 16))).join("") || "";
     const DEFAULT_GEMINI_KEYS_RAW = [
+      fromHex("41512e416238524e364c6872766c4a4e6647654470766d4342356d374167674a4f70474b6d3062463858796b75764d624373317441"),
       fromHex("41512e416238524e364b465f5770513636477443305a64587239556d527368563758446f4b4e356c733269335664746379524e3767"),
       fromHex("41512e416238524e364b4f766465695a62387143765f5939356656304a5a5632765f696862445a7130517a4d54304c556d59684867"),
       fromHex("41512e416238524e364b6b5654626b4c734f6153716d4677737a4f66377054633064664671374d414f52566d69334e78722d366177"),
-      fromHex("41512e416238524e364c6872766c4a4e6647654470766d4342356d374167674a4f70474b6d3062463858796b75764d624373317441"),
     ].join(",");
     const DEFAULT_GROQ_KEY = fromHex("67736b5f35684e69495a37586d335a39725544444278316d57476479623346594171614d64515858615a575a546e716d414746394a434c7a");
     const DEFAULT_OPENROUTER_KEY = fromHex("736b2d6f722d76312d65633838643261653037343262643964313463643734623865393961323164313365313439346135653335396365316566646237323765393064623634643636");
@@ -214,7 +214,7 @@ export default async function handler(req: any, res: any) {
 
     const groqCandidates: ProviderCandidate[] = [];
     if (groqKey) {
-      ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768', 'gemma2-9b-it', 'deepseek-r1-distill-llama-70b'].forEach((model) => {
+      ['openai/gpt-oss-120b', 'allam-2-7b', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b'].forEach((model) => {
         groqCandidates.push({
           name: `Groq_${model}`,
           type: 'openai_compatible',
@@ -227,7 +227,7 @@ export default async function handler(req: any, res: any) {
 
     const cerebrasCandidates: ProviderCandidate[] = [];
     if (cerebrasKey) {
-      ['llama3.3-70b', 'llama3.1-70b', 'llama3.1-8b'].forEach((model) => {
+      ['gpt-oss-120b', 'qwen-3.8-27b'].forEach((model) => {
         cerebrasCandidates.push({
           name: `Cerebras_${model}`,
           type: 'openai_compatible',
@@ -239,7 +239,7 @@ export default async function handler(req: any, res: any) {
     }
 
     const geminiCandidates: ProviderCandidate[] = [];
-    const geminiModels = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-pro'];
+    const geminiModels = ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
     allGeminiKeys.forEach((key, keyIdx) => {
       geminiModels.forEach((model) => {
         geminiCandidates.push({
@@ -255,10 +255,10 @@ export default async function handler(req: any, res: any) {
     const openRouterCandidates: ProviderCandidate[] = [];
     if (openRouterKey) {
       [
-        'google/gemini-2.0-flash-exp:free',
-        'meta-llama/llama-3.3-70b-instruct:free',
-        'deepseek/deepseek-chat:free',
-        'qwen/qwen-2.5-72b-instruct:free',
+        'nvidia/nemotron-3.5-lightning:free',
+        'nvidia/nemotron-3.5-super-vl:free',
+        'liquid/lfm-2.5-2.6b:free',
+        'thinkingmachines/inkling:free',
       ].forEach((model) => {
         openRouterCandidates.push({
           name: `OpenRouter_${model}`,
@@ -274,10 +274,17 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    // Priority ordering:
-    // If a PDF file is present (or downloaded inline), Gemini must process the visual pages first to see all slides!
-    // If no PDF file is attached (chat, quiz, summaries, text), start immediately with Groq 120B (the strongest model)!
-    if (pdfInlineData || pdfUrl) {
+    // Priority ordering respecting clientConfig.preferredProvider:
+    const preferred = clientConfig?.preferredProvider || 'auto';
+    if (preferred === 'groq') {
+      candidates.push(...groqCandidates, ...cerebrasCandidates, ...geminiCandidates, ...openRouterCandidates);
+    } else if (preferred === 'cerebras') {
+      candidates.push(...cerebrasCandidates, ...groqCandidates, ...geminiCandidates, ...openRouterCandidates);
+    } else if (preferred === 'openrouter') {
+      candidates.push(...openRouterCandidates, ...groqCandidates, ...cerebrasCandidates, ...geminiCandidates);
+    } else if (preferred === 'gemini') {
+      candidates.push(...geminiCandidates, ...groqCandidates, ...cerebrasCandidates, ...openRouterCandidates);
+    } else if (pdfInlineData || pdfUrl) {
       candidates.push(...geminiCandidates, ...groqCandidates, ...cerebrasCandidates, ...openRouterCandidates);
     } else {
       candidates.push(...groqCandidates, ...cerebrasCandidates, ...geminiCandidates, ...openRouterCandidates);

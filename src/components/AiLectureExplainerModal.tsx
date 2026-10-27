@@ -154,13 +154,12 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
     return getAiProvidersConfig().preferredProvider || "auto";
   });
   const [inputKey, setInputKey] = useState(() => {
-    const custom = localStorage.getItem("lms_gemini_api_key");
-    if (custom) return custom;
     const config = getAiProvidersConfig();
-    if (config.preferredProvider === "groq") return DEFAULT_GROQ_KEY;
-    if (config.preferredProvider === "cerebras") return DEFAULT_CEREBRAS_KEY;
-    if (config.preferredProvider === "openrouter") return DEFAULT_OPENROUTER_KEY;
-    return DEFAULT_GEMINI_KEY;
+    const pref = config.preferredProvider || "auto";
+    if (pref === "groq") return config.groqKey || DEFAULT_GROQ_KEY;
+    if (pref === "cerebras") return config.cerebrasKey || DEFAULT_CEREBRAS_KEY;
+    if (pref === "openrouter") return config.openRouterKey || DEFAULT_OPENROUTER_KEY;
+    return config.geminiKeys?.[0] || DEFAULT_GEMINI_KEY;
   });
   const [totalPdfPages, setTotalPdfPages] = useState<number>(0);
 
@@ -568,17 +567,32 @@ ${slideCountInstruction}
   const handleSelectProvider = (prov: "auto" | "groq" | "gemini" | "cerebras" | "openrouter") => {
     playClickSfx();
     setSelectedProvider(prov);
+    let keyToUse = "";
     if (prov === "groq") {
-      setInputKey(DEFAULT_GROQ_KEY);
+      keyToUse = DEFAULT_GROQ_KEY;
     } else if (prov === "gemini") {
-      setInputKey(DEFAULT_GEMINI_KEY);
+      keyToUse = DEFAULT_GEMINI_KEY;
     } else if (prov === "cerebras") {
-      setInputKey(DEFAULT_CEREBRAS_KEY);
+      keyToUse = DEFAULT_CEREBRAS_KEY;
     } else if (prov === "openrouter") {
-      setInputKey(DEFAULT_OPENROUTER_KEY);
+      keyToUse = DEFAULT_OPENROUTER_KEY;
     } else if (prov === "auto") {
-      setInputKey(DEFAULT_GROQ_KEY || DEFAULT_GEMINI_KEY);
+      keyToUse = DEFAULT_GEMINI_KEY || DEFAULT_GROQ_KEY;
     }
+    setInputKey(keyToUse);
+
+    const providerNameMap: Record<string, string> = {
+      auto: lang === "ar" ? "التبديل التلقائي الذكي" : "Smart Auto Rotation",
+      groq: "Groq Cloud (120B)",
+      gemini: "Google Gemini (Gemini 3.8 Flash)",
+      cerebras: "Cerebras Cloud (120B)",
+      openrouter: "OpenRouter (Nemotron)",
+    };
+    toast.success(
+      lang === "ar"
+        ? `تم تعليم نموذج [${providerNameMap[prov] || prov}] ووضع المفتاح الافتراضي الخاص بك تلقائياً! ✅`
+        : `Selected [${providerNameMap[prov] || prov}] with default key applied! ✅`
+    );
   };
 
   const handleResetToDefaultKey = () => {
@@ -594,11 +608,11 @@ ${slideCountInstruction}
     const cleanKey = inputKey.trim();
     saveAiProvidersConfig({
       preferredProvider: selectedProvider,
-      ...(cleanKey.startsWith("gsk_") ? { groqKey: cleanKey } : {}),
-      ...(cleanKey.startsWith("csk-") ? { cerebrasKey: cleanKey } : {}),
-      ...(cleanKey.startsWith("sk-or-") ? { openRouterKey: cleanKey } : {}),
-      ...(cleanKey && !cleanKey.startsWith("gsk_") && !cleanKey.startsWith("csk-") && !cleanKey.startsWith("sk-or-")
-        ? { geminiKeys: [cleanKey, ...DEFAULT_GEMINI_KEYS] }
+      ...(selectedProvider === "groq" || cleanKey.startsWith("gsk_") ? { groqKey: cleanKey || DEFAULT_GROQ_KEY } : {}),
+      ...(selectedProvider === "cerebras" || cleanKey.startsWith("csk-") ? { cerebrasKey: cleanKey || DEFAULT_CEREBRAS_KEY } : {}),
+      ...(selectedProvider === "openrouter" || cleanKey.startsWith("sk-or-") ? { openRouterKey: cleanKey || DEFAULT_OPENROUTER_KEY } : {}),
+      ...(selectedProvider === "gemini" || selectedProvider === "auto" || (!cleanKey.startsWith("gsk_") && !cleanKey.startsWith("csk-") && !cleanKey.startsWith("sk-or-"))
+        ? { geminiKeys: cleanKey ? [cleanKey, ...DEFAULT_GEMINI_KEYS] : DEFAULT_GEMINI_KEYS }
         : {}),
     });
 
@@ -610,9 +624,9 @@ ${slideCountInstruction}
     const providerNameMap: Record<string, string> = {
       auto: lang === "ar" ? "التبديل التلقائي الذكي بين الجميع" : "Smart Auto Rotation",
       groq: "Groq Cloud (120B)",
-      gemini: "Google Gemini (4 مشاريع)",
-      cerebras: "Cerebras Cloud",
-      openrouter: "OpenRouter",
+      gemini: "Google Gemini (Gemini 3.8 Flash)",
+      cerebras: "Cerebras Cloud (120B)",
+      openrouter: "OpenRouter (Nemotron)",
     };
     toast.success(
       lang === "ar"
@@ -2043,37 +2057,37 @@ ${slideCountInstruction}
                   {
                     id: "auto",
                     name: lang === "ar" ? "التبديل التلقائي الذكي بين النماذج (Auto)" : "Smart Auto Rotation",
-                    desc: lang === "ar" ? "Gemini للـ PDF + Groq للشات والملخصات" : "Gemini for PDF + Groq for chat",
+                    desc: lang === "ar" ? "Gemini للـ PDF + Groq 120B للشات والملخصات" : "Gemini for PDF + Groq 120B for chat",
                     badge: lang === "ar" ? "موصى به 🔥" : "Recommended",
-                    borderActive: "border-primary bg-primary/10 text-primary",
+                    borderActive: "border-primary bg-primary/10 text-primary ring-2 ring-primary/40",
                   },
                   {
                     id: "groq",
                     name: "Groq Cloud (120B)",
-                    desc: lang === "ar" ? "14,400 طلب/يوم - فائق السرعة" : "14.4k req/day - Ultra Fast",
-                    badge: lang === "ar" ? "الأعلى كوتا" : "Highest Quota",
-                    borderActive: "border-amber-500 bg-amber-500/10 text-amber-500",
+                    desc: lang === "ar" ? "14,400 طلب/يوم - الأقوى والأسرع" : "14.4k req/day - Ultra Fast 120B",
+                    badge: lang === "ar" ? "120B صاروخي ⚡" : "Fastest 120B",
+                    borderActive: "border-amber-500 bg-amber-500/10 text-amber-500 ring-2 ring-amber-500/40",
                   },
                   {
                     id: "gemini",
-                    name: "Google Gemini (4 مشاريع)",
-                    desc: lang === "ar" ? "الأقوى لقراءة ملفات PDF بصرية" : "Best for Visual Multimodal PDF",
-                    badge: lang === "ar" ? "قراءة بصرية" : "Vision",
-                    borderActive: "border-blue-500 bg-blue-500/10 text-blue-500",
+                    name: "Google Gemini (Gemini 3.8 Flash)",
+                    desc: lang === "ar" ? "الأقوى لقراءة ملفات PDF بصرية (4 مشاريع)" : "Gemini 3.8 Flash Vision for PDF",
+                    badge: lang === "ar" ? "قراءة بصرية 📄" : "Vision",
+                    borderActive: "border-blue-500 bg-blue-500/10 text-blue-500 ring-2 ring-blue-500/40",
                   },
                   {
                     id: "cerebras",
-                    name: "Cerebras Cloud",
-                    desc: lang === "ar" ? "أسرع معالج في العالم (120B)" : "World's Fastest Inference",
-                    badge: lang === "ar" ? "مليون توكن" : "1M Tokens",
-                    borderActive: "border-purple-500 bg-purple-500/10 text-purple-500",
+                    name: "Cerebras Cloud (120B)",
+                    desc: lang === "ar" ? "أسرع معالج في العالم (مليون توكن/يوم)" : "World's Fastest Inference (1M Tokens)",
+                    badge: lang === "ar" ? "مليون توكن 🚀" : "1M Tokens",
+                    borderActive: "border-purple-500 bg-purple-500/10 text-purple-500 ring-2 ring-purple-500/40",
                   },
                   {
                     id: "openrouter",
-                    name: "OpenRouter",
-                    desc: lang === "ar" ? "بوابة النماذج المفتوحة" : "Open Router Gateway",
-                    badge: lang === "ar" ? "نماذج متعددة" : "Multiple Models",
-                    borderActive: "border-emerald-500 bg-emerald-500/10 text-emerald-500",
+                    name: "OpenRouter (Nemotron)",
+                    desc: lang === "ar" ? "بوابة النماذج المفتوحة المجانية" : "Free Open Models Gateway",
+                    badge: lang === "ar" ? "نماذج متعددة 🌐" : "Multiple Models",
+                    borderActive: "border-emerald-500 bg-emerald-500/10 text-emerald-500 ring-2 ring-emerald-500/40",
                   },
                 ].map((prov) => {
                   const isSelected = selectedProvider === prov.id;
@@ -2082,15 +2096,23 @@ ${slideCountInstruction}
                       key={prov.id}
                       type="button"
                       onClick={() => handleSelectProvider(prov.id as any)}
-                      className={`p-2.5 rounded-xl border text-right transition-all flex flex-col justify-between gap-1.5 ${
+                      className={`p-2.5 rounded-xl border text-right transition-all flex flex-col justify-between gap-1.5 cursor-pointer ${
                         isSelected
-                          ? `${prov.borderActive} shadow-xs ring-1 ring-primary/40 font-semibold`
+                          ? `${prov.borderActive} shadow-xs font-semibold`
                           : "border-border/50 bg-secondary/30 hover:border-border hover:bg-secondary/60 text-foreground"
                       } ${prov.id === "auto" ? "col-span-2" : ""}`}
                     >
                       <div className="flex items-center justify-between w-full">
-                        <span className="text-xs font-bold flex items-center gap-1.5">
-                          {isSelected ? <Check className="w-3.5 h-3.5 shrink-0" /> : <div className="w-2.5 h-2.5 rounded-full border border-muted-foreground/60 shrink-0" />}
+                        <span className="text-xs font-bold flex items-center gap-2">
+                          <span
+                            className={`w-4 h-4 rounded-full flex items-center justify-center border transition-all ${
+                              isSelected
+                                ? "bg-primary border-primary text-primary-foreground shadow-xs"
+                                : "border-muted-foreground/60 bg-background/50"
+                            }`}
+                          >
+                            {isSelected && <Check className="w-2.5 h-2.5 stroke-[3]" />}
+                          </span>
                           <span>{prov.name}</span>
                         </span>
                         <span className="text-[9px] px-1.5 py-0.2 rounded-full font-bold bg-background/60 border border-border/40">
