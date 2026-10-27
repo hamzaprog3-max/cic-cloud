@@ -32,6 +32,7 @@ import {
   FileText,
   FileDown,
   Eye,
+  EyeOff,
   Undo2,
   Trash2,
   Layers,
@@ -121,7 +122,8 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
 
   // API Key Settings Modal
   const [showKeyDialog, setShowKeyDialog] = useState(false);
-  const [inputKey, setInputKey] = useState(getGeminiApiKey());
+  const [showKeyPassword, setShowKeyPassword] = useState(false);
+  const [inputKey, setInputKey] = useState(() => localStorage.getItem("lms_gemini_api_key") || "");
 
   // Load cached content on open
   useEffect(() => {
@@ -182,11 +184,17 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
       const lines = chunk.trim().split("\n");
       const headerLine = lines[0].replace(/^##\s+/, "").trim();
       const numMatch = headerLine.match(/\d+/);
-      const slideNum = numMatch ? parseInt(numMatch[0], 10) : idx + 1;
+      const isExplicitSlide = /(?:السلايد|شريحة|صفحة|Slide)\s*\d+/i.test(headerLine);
+      const isIntro = idx === 0 && !isExplicitSlide;
+      const slideNum = isExplicitSlide && numMatch ? parseInt(numMatch[0], 10) : idx + 1;
+      const displayLabel = isIntro ? (lang === "ar" ? "مقدمة" : "Intro") : `${slideNum}`;
+
       return {
         id: idx,
         slideNum,
-        title: headerLine || (lang === "ar" ? `السلايد ${slideNum}` : `Slide ${slideNum}`),
+        displayLabel,
+        isIntro,
+        title: headerLine || (isIntro ? (lang === "ar" ? "مقدمة المحاضرة" : "Lecture Intro") : (lang === "ar" ? `السلايد ${slideNum}` : `Slide ${slideNum}`)),
         content: chunk.trim(),
       };
     });
@@ -248,8 +256,10 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
         prompt = `أنت "المعيد الدحيح" والأخ الأكبر العبقري والداعم لطلاب الجامعة في منصتنا التعليمية. مهمتك تفكيك وشرح هذه المحاضرة بعنوان "${material.title}"${courseName} بالكامل من أول سلايد وحتى آخر سلايد دون أي تلخيص مخل ودون إهمال لأي صفحة أو فكرة أو مسألة!
 
 🚨 قواعد وطريقة الشرح الإلزامية:
-1. سر بالترتيب الدقيق للمحاضرة، وقسّم الشرح إلى أقسام واضحة، كل قسم يمثل سلايد/صفحة معنوناً كالتالي حصراً:
-   ## 📄 السلايد [الرقم]: [عنوان السلايد بالإنجليزية أو العربية]
+1. 📚 شمولية وتغطية كاملة لكافة السلايدات (Comprehensive Slide-by-Slide):
+   - تتبع كافة شرائح المحاضرة الأصلية صفحة بصفحة وسلايد بسلايد (السلايد 1، السلايد 2، السلايد 3، السلايد 4، السلايد 5... وحتى آخر سلايد في المحاضرة بالكامل).
+   - ⚠️ ممنوع نهائياً التوقف عند 3 أو 4 شرائح فقط أو تجميع المحاضرة كلها في نقاط عامة! إذا كان ملف المحاضرة يحتوي على 10 أو 15 أو 25 سلايد، يجب شرح كل شريحة منها في قسم منفصل تماماً يحمل رقمها الفعلي:
+     ## 📄 السلايد [الرقم الفعلي]: [عنوان السلايد بالإنجليزية أو العربية]
 
 2. لكل سلايد أو مسألة في المحاضرة، التزم بهذا الهيكل الممتع والعبقري:
    - 🔍 **فكرة السلايد بالبلدي في كلمتين**: توضيح الفكرة المحورية للسلايد بالعامية المصرية السلسة دون رغي أو تعقيد.
@@ -950,7 +960,7 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
                                   }`}
                                   title={slide.title}
                                 >
-                                  {slide.slideNum}
+                                  {slide.displayLabel || slide.slideNum}
                                 </button>
                               );
                             })}
@@ -978,17 +988,19 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
                             </Button>
 
                             <div className="flex items-center gap-2 text-center">
-                              <span className="w-7 h-7 rounded-lg bg-primary/10 text-primary font-bold text-xs flex items-center justify-center border border-primary/20">
-                                {currentSlide.slideNum}
+                              <span className="min-w-7 px-2 h-7 rounded-lg bg-primary/10 text-primary font-bold text-xs flex items-center justify-center border border-primary/20">
+                                {currentSlide.displayLabel || currentSlide.slideNum}
                               </span>
                               <div className="text-right">
                                 <p className="text-xs font-bold text-foreground truncate max-w-xs sm:max-w-md">
                                   {currentSlide.title}
                                 </p>
                                 <p className="text-[10px] text-muted-foreground">
-                                  {lang === "ar"
-                                    ? `السلايد ${currentSlideIndex + 1} من إجمالي ${parsedSlides.length}`
-                                    : `Slide ${currentSlideIndex + 1} of ${parsedSlides.length}`}
+                                  {currentSlide.isIntro
+                                    ? (lang === "ar" ? "المقدمة التمهيدية للمحاضرة" : "Introductory Overview")
+                                    : (lang === "ar"
+                                        ? `السلايد ${currentSlide.slideNum} من إجمالي ${parsedSlides.filter(s => !s.isIntro).length}`
+                                        : `Slide ${currentSlide.slideNum} of ${parsedSlides.filter(s => !s.isIntro).length}`)}
                                 </p>
                               </div>
                             </div>
@@ -1887,39 +1899,69 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
             </p>
 
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold">{lang === "ar" ? "مفتاح API الخاص بك (Gemini / Groq / Cerebras / OpenRouter):" : "Your API Key:"}</label>
-              <Input
-                type="password"
-                placeholder="AIzaSy... أو gsk_... أو csk-... أو sk-or-..."
-                value={inputKey}
-                onChange={(e) => setInputKey(e.target.value)}
-                className="bg-secondary/50 font-mono text-xs"
-              />
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-semibold">
+                  {lang === "ar" ? "مفتاح API الخاص بك (طوارئ الامتحانات):" : "Your Emergency API Key:"}
+                </label>
+                {inputKey && (
+                  <span className="text-[10px] text-emerald-500 font-medium">
+                    {inputKey.startsWith("gsk_")
+                      ? "Groq Key"
+                      : inputKey.startsWith("csk-")
+                      ? "Cerebras Key"
+                      : inputKey.startsWith("sk-or-")
+                      ? "OpenRouter Key"
+                      : "Gemini Key"}
+                  </span>
+                )}
+              </div>
+              <div className="relative">
+                <Input
+                  type={showKeyPassword ? "text" : "password"}
+                  placeholder={lang === "ar" ? "ألصق مفتاحك هنا (AIzaSy... أو gsk_... أو csk-... أو sk-or-...)" : "Paste key (AIzaSy..., gsk_..., csk-..., sk-or-...)"}
+                  value={inputKey}
+                  onChange={(e) => setInputKey(e.target.value)}
+                  className="bg-secondary/50 font-mono text-xs pr-9 ltr:pr-9 rtl:pl-9"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowKeyPassword(!showKeyPassword)}
+                  className="absolute top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground ltr:right-2.5 rtl:left-2.5 p-1"
+                  title={showKeyPassword ? (lang === "ar" ? "إخفاء المفتاح" : "Hide") : (lang === "ar" ? "إظهار المفتاح" : "Show")}
+                >
+                  {showKeyPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                </button>
+              </div>
+              <p className="text-[10px] text-muted-foreground">
+                {lang === "ar"
+                  ? "💡 المنصة تعمل تلقائياً بمفاتيح السيرفر (Groq 120B و 4 مشاريع Gemini). لا تحتاج لإدخال مفتاح هنا إلا إذا أردت استخدام كوتا خاصة بك."
+                  : "💡 The platform works automatically. Only paste a personal key if you want your own custom quota."}
+              </p>
             </div>
 
             <div className="p-3 rounded-xl bg-secondary/40 text-[11px] text-muted-foreground space-y-2 border border-border/40">
               <p className="font-semibold text-foreground flex items-center gap-1.5">
                 <Sparkles className="w-3.5 h-3.5 text-primary" />
-                {lang === "ar" ? "روابط الحصول على مفاتيح مجانية في ثوانٍ:" : "Get free keys instantly:"}
+                {lang === "ar" ? "روابط الحصول على مفاتيح مجانية مرتبة بالأقوى والأكثر طلباً:" : "Get free keys ranked by capacity & speed:"}
               </p>
               <div className="flex flex-col gap-1.5">
-                <a
-                  href="https://aistudio.google.com/app/apikey"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-primary hover:underline font-semibold flex items-center justify-between"
-                >
-                  <span>1. Google AI Studio (Gemini Flash)</span>
-                  <span className="text-[10px] text-muted-foreground">1,500 طلب/يوم مجاناً ↗</span>
-                </a>
                 <a
                   href="https://console.groq.com/keys"
                   target="_blank"
                   rel="noreferrer"
                   className="text-amber-500 hover:underline font-semibold flex items-center justify-between"
                 >
-                  <span>2. Groq Cloud (فائق السرعة)</span>
-                  <span className="text-[10px] text-muted-foreground">14,400 طلب/يوم مجاناً ↗</span>
+                  <span>1. Groq Cloud (الأقوى والأكثر طلباً - 120B)</span>
+                  <span className="text-[10px] text-amber-500/90 font-bold">14,400 طلب/يوم مجاناً ↗</span>
+                </a>
+                <a
+                  href="https://aistudio.google.com/app/apikey"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-primary hover:underline font-semibold flex items-center justify-between"
+                >
+                  <span>2. Google AI Studio (الأقوى لقراءة ملفات PDF بصرية)</span>
+                  <span className="text-[10px] text-primary/90 font-bold">1,500 طلب/يوم مجاناً ↗</span>
                 </a>
                 <a
                   href="https://cloud.cerebras.ai"
@@ -1927,8 +1969,8 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
                   rel="noreferrer"
                   className="text-purple-400 hover:underline font-semibold flex items-center justify-between"
                 >
-                  <span>3. Cerebras Cloud (سريع جداً)</span>
-                  <span className="text-[10px] text-muted-foreground">مليون توكن/يوم مجاناً ↗</span>
+                  <span>3. Cerebras Cloud (أسرع معالج في العالم - 120B)</span>
+                  <span className="text-[10px] text-purple-400/90 font-bold">مليون توكن/يوم مجاناً ↗</span>
                 </a>
                 <a
                   href="https://openrouter.ai/keys"
@@ -1936,8 +1978,8 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
                   rel="noreferrer"
                   className="text-emerald-500 hover:underline font-semibold flex items-center justify-between"
                 >
-                  <span>4. OpenRouter (نماذج مجانية)</span>
-                  <span className="text-[10px] text-muted-foreground">نماذج مجانية غير محدودة ↗</span>
+                  <span>4. OpenRouter (بوابة النماذج المجانية المفتوحة)</span>
+                  <span className="text-[10px] text-emerald-500/90 font-bold">نماذج مجانية غير محدودة ↗</span>
                 </a>
               </div>
             </div>
