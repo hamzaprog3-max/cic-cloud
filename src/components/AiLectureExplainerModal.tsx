@@ -40,7 +40,7 @@ import {
   Search,
   RotateCcw,
   AlertTriangle,
-  CheckCircle2,
+  Pause,
 } from "lucide-react";
 import { FormattedAiText } from "@/components/FormattedAiText";
 import { exportToWordDocument, exportToPdfPrint } from "@/lib/export-doc";
@@ -163,9 +163,41 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
   });
   const [totalPdfPages, setTotalPdfPages] = useState<number>(0);
 
+  // Progressive batch generation state for large slide decks
+  const [generationProgress, setGenerationProgress] = useState<{
+    isActive: boolean;
+    currentSlide: number;
+    totalSlides: number;
+    currentBatch: number;
+    totalBatches: number;
+  }>({
+    isActive: false,
+    currentSlide: 0,
+    totalSlides: 0,
+    currentBatch: 0,
+    totalBatches: 0,
+  });
+
+  const abortGenerationRef = React.useRef<boolean>(false);
+
+  const handlePauseGeneration = () => {
+    abortGenerationRef.current = true;
+    setGenerationProgress((prev) => ({ ...prev, isActive: false }));
+    setLoading(false);
+    toast.info(
+      lang === "ar"
+        ? "تم إيقاف الشرح مؤقتاً والاحتفاظ بكافة السلايدات المشروحة حتى الآن ⏸️"
+        : "Paused generation, all completed slides preserved ⏸️"
+    );
+  };
+
   // Load cached content and detect PDF page count on open
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      abortGenerationRef.current = true;
+      setGenerationProgress((prev) => ({ ...prev, isActive: false }));
+      return;
+    }
 
     if (material.pdf_url) {
       detectPdfPageCount(material.pdf_url).then((count) => {
@@ -229,7 +261,7 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
       }
     }
 
-    return chunks.map((chunk, idx) => {
+    const rawList = chunks.map((chunk, idx) => {
       const lines = chunk.trim().split("\n");
       const headerLine = lines[0].replace(/^##\s+/, "").trim();
       const numMatch = headerLine.match(/\d+/);
@@ -247,6 +279,18 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
         content: chunk.trim(),
       };
     });
+
+    // Deduplicate by slideNum so each slide number appears exactly once
+    const seen = new Set<string>();
+    const deduplicated: typeof rawList = [];
+    for (const item of rawList) {
+      const key = item.isIntro ? "intro" : `slide_${item.slideNum}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        deduplicated.push(item);
+      }
+    }
+    return deduplicated;
   }, [fullExplanation, editedFullExplanation, isEditingFullExplanation, lang]);
 
   const filteredSlides = useMemo(() => {
@@ -270,15 +314,19 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
     );
   };
 
-  const handleGenerate = async (type: TabType, forceRefresh = false) => {
+  const handleGenerate = async (
+    type: TabType,
+    forceRefresh = false,
+    startFromSlide?: number
+  ) => {
     playClickSfx();
     if (!hasGeminiApiKey()) {
       setShowKeyDialog(true);
       return;
     }
 
-    // Check cache first unless forced
-    if (!forceRefresh) {
+    // Check cache first unless forced or resuming
+    if (!forceRefresh && !startFromSlide) {
       const cached = getCachedAiContent(material.id, type, material.pdf_url);
       if (cached) {
         if (type === "full_explain") setFullExplanation(cached);
@@ -308,43 +356,141 @@ export const AiLectureExplainerModal: React.FC<Props> = ({
           if (detectedSlides > 0) setTotalPdfPages(detectedSlides);
         }
 
-        const slideCountInstruction = detectedSlides > 0
-          ? `🚨 تنبيه إلزامي وحاسم جداً (Strict Slide Count Enforcement):
-ملف المحاضرة المرفق يحتوي بالضبط على عدد [${detectedSlides}] سلايد (شريحة)!
-مهمتك الإلزامية التي لا تقبل أي تجزئة أو تلخيص مخل هي تفكيك وشرح المحاضرة بالكامل بعدد شرائحها الـ ${detectedSlides} كاملة من الشريحة 1 وحتى الشريحة ${detectedSlides} دون استثناء أي شريحة ودون دمج شرائح!
-- ⚠️ ممنوع نهائياً التوقف عند 3 أو 4 شرائح!
-- ⚠️ ممنوع دمج شريحتين في قسم واحد!
-- يجب أن يكون لكل شريحة عنوان رئيسي منفصل يحمل رقمها الفعلي بدقة:
-## 📄 السلايد 1: [عنوان السلايد]
-## 📄 السلايد 2: [عنوان السلايد]
+        // CHUNKED PROGRESSIVE GENERATION for large slide decks (> 6 slides)
+        // Solves freezing/hangs, guarantees thoroughness, and displays slides immediately!
+        if (detectedSlides > 6) {
+          const BATCH_SIZE = 5;
+          const initialStart = startFromSlide && startFromSlide > 1 ? startFromSlide : 1;
+          const batches: { start: number; end: number }[] = [];
+          for (let s = initialStart; s <= detectedSlides; s += BATCH_SIZE) {
+            batches.push({
+              start: s,
+              end: Math.min(s + BATCH_SIZE - 1, detectedSlides),
+            });
+          }
+
+          abortGenerationRef.current = false;
+          let accumulatedText = startFromSlide && startFromSlide > 1 ? fullExplanation : "";
+          if (!startFromSlide || startFromSlide <= 1) {
+            setFullExplanation("");
+          }
+
+          setGenerationProgress({
+            isActive: true,
+            currentSlide: initialStart - 1,
+            totalSlides: detectedSlides,
+            currentBatch: 0,
+            totalBatches: batches.length,
+          });
+
+          for (let i = 0; i < batches.length; i++) {
+            if (abortGenerationRef.current) break;
+
+            const { start, end } = batches[i];
+            setGenerationProgress({
+              isActive: true,
+              currentSlide: start - 1,
+              totalSlides: detectedSlides,
+              currentBatch: i + 1,
+              totalBatches: batches.length,
+            });
+
+            const batchPrompt = `أنت "المعيد الدحيح" وصاحب الطالب الجدع في الجامعة.
+مهمتك تفكيك وشرح السلايدات من الشريحة رقم [${start}] إلى الشريحة رقم [${end}] بالتحديد (من إجمالي ${detectedSlides} سلايد في محاضرة "${material.title}"${courseName}) دون أي تلخيص مخل ودون إهمال لأي صفحة أو فكرة أو مسألة!
+
+🚨 قواعد إلزامية ودقيقة جداً:
+1. ركز فقط وبدقة شديدة على نطاق السلايدات من [${start}] إلى [${end}] فقط!
+2. ابدأ كل سلايد بعنوان رئيسي واضح ومحدد برقمها الفعلي:
+## 📄 السلايد ${start}: [عنوان السلايد]
 ...
-## 📄 السلايد ${detectedSlides}: [عنوان السلايد]
+## 📄 السلايد ${end}: [عنوان السلايد]
 
-⚡ لتتمكن من شرح كافة الـ ${detectedSlides} شريحة بالكامل دون نفاذ الحد الأقصى للرموز (Tokens):
-اجعل تفكيك كل شريحة فائق التركيز والعمق ومباشراً وفق الهيكل التالي:`
-          : `🚨 تنبيه إلزامي وحاسم:
-يجب عليك فحص ملف الـ PDF المرفق وتتبع كافة شرائح وسلايدات المحاضرة بالكامل شريحة بشريحة (السلايد 1، 2، 3، 4...) دون أي توقف أو تلخيص مخل ودون دمج شرائح!
-- يجب ترقيم كل شريحة برقمها الفعلي:
-## 📄 السلايد [الرقم الفعلي]: [عنوان السلايد]
+3. 🗣️ طريقة الشرح بالعامية المصرية البسيطة خالص (عامة ومفهومة للجميع):
+- اشرح بلغة عامية مصرية بيضاء وسلسة وسهلة جداً، كأنك بتشرح لواحد صاحبك ع القهوة أو في المدرج قبل الامتحان بساعة.
+- ابعد تماماً عن التقعير اللغوي أو رغي الكتب الجاف، وابعد عن الترجمة الحرفية الميتة للمصطلحات الإنجليزية.
+- ابدأ دايماً بفهم الفكرة بالبلدي ومن الآخر في كلمتين يفهمهم أي طالب حتى لو مستواه ضعيف أو مفتحش المادة من أول الترم (زي: "بص يا سيدي"، "تعال نفصص الحتة دي"، "الموضوع بسيط خالص"، "عارف يعني إيه كذا؟ يعني ببساطة...").
 
-⚡ اجعل تفكيك كل شريحة فائق التركيز والعمق لتغطية كافة شرائح المحاضرة كاملة حتى آخر سلايد وفق الهيكل التالي:`;
-
-        prompt = `أنت "المعيد الدحيح" والأخ الأكبر العبقري والداعم لطلاب الجامعة في منصتنا التعليمية. مهمتك تفكيك وشرح هذه المحاضرة بعنوان "${material.title}"${courseName} بالكامل لكافة السلايدات دون أي تلخيص مخل ودون إهمال لأي صفحة أو فكرة أو مسألة!
-
-${slideCountInstruction}
-1. لكل سلايد أو مسألة في المحاضرة، التزم بهذا الهيكل الممتع والعبقري:
-   - 🔍 **فكرة السلايد بالبلدي في كلمتين**: توضيح الفكرة المحورية للسلايد بالعامية المصرية السلسة دون رغي أو تعقيد.
-   - 📌 **المعطيات والبيانات الأصلية للسلايد**: تفريغ دقيق للبيانات والأرقام والمصطلحات والرسومات أو الكود في السلايد.
-   - 🧩 **تفكيك الألغاز والتريكات حتة حتة (تعال نفصصها حتة حتة)**:
-     * إذا كانت المسألة رياضية أو حسابية: فك التريكات الرياضية خطوة بخطوة بالمعادلات ($...$ و $...$).
+4. التزم بهذا الهيكل الممتع والعبقري لكل سلايد من (${start} إلى ${end}):
+   - 🔍 **فكرة السلايد بالبلدي في كلمتين**: توضيح الفكرة المحورية بالعامية المصرية السلسة دون أي تقعير أو تعقيد.
+   - 📌 **المعطيات والأرقام الأصلية للسلايد**: تفريغ دقيق للأرقام، القوانين، الكود، أو العناصر في السلايد.
+   - 🧩 **تفكيك الألغاز والتريكات حتة حتة (تعال نفصصها بالبلدي)**:
+     * إذا كانت المسألة رياضية أو حسابية: فك التريكات خطوة بخطوة بالمعادلات ($...$ و $$...$$).
      * إذا كانت المادة برمجية: فصص فكرة الكود واكتب الكود كاملاً مشروحاً مع ناتج التنفيذ والـ Edge Cases.
      * إذا كانت المادة نظرية: أمثلة واقعية وجداول مقارنة.
    - ⚠️ **ملحوظة دحيح / فخ الامتحان (Exam Trap)**: الأخطاء الشائعة وكيف يتعامل معها في ورقة الامتحان.
    - 🎯 **تجميعة الحل النهائي (نموذج إجابة الامتحان)**: الحل الصافي والمنظم جداً أو الكود النهائي.
 
-2. في نهاية الشرح بالكامل، اختم بسؤال تفاعلي لطيف ومشجع (زي: "تحب نمسك أي مسألة من دول ونحلها سوا خطوة بخطوة كأنك في لجنة الامتحان؟").
+ابدأ فوراً الشرح بالتفصيل للسلايدات من ${start} إلى ${end}:`;
 
-ابدأ الآن تفصيص المحاضرة من أول سلايد لآخر سلايد بنفس هذه الطريقة الممتعة والدقيقة!`;
+            const batchResult = await callGeminiApi({
+              prompt: batchPrompt,
+              pdfUrl: material.pdf_url,
+              listContent: material.list_content,
+              maxOutputTokens: 8192,
+            });
+
+            if (abortGenerationRef.current) break;
+
+            accumulatedText = accumulatedText
+              ? `${accumulatedText.trim()}\n\n${batchResult.trim()}`
+              : batchResult.trim();
+
+            setFullExplanation(accumulatedText);
+            setCachedAiContent(material.id, "full_explain", accumulatedText, material.pdf_url);
+
+            // Hide full-screen spinner immediately after the very first batch so user can interact!
+            setLoading(false);
+
+            setGenerationProgress((prev) => ({
+              ...prev,
+              currentSlide: end,
+            }));
+          }
+
+          if (!abortGenerationRef.current) {
+            setGenerationProgress({
+              isActive: false,
+              currentSlide: detectedSlides,
+              totalSlides: detectedSlides,
+              currentBatch: batches.length,
+              totalBatches: batches.length,
+            });
+            toast.success(
+              lang === "ar"
+                ? `تم تفكيك وشرح كافة الـ (${detectedSlides}) سلايد بنجاح! 🚀`
+                : `All (${detectedSlides}) slides explained successfully! 🚀`
+            );
+          }
+          return;
+        }
+
+        const slideCountInstruction = detectedSlides > 0
+          ? `ملف المحاضرة يحتوي على [${detectedSlides}] سلايد. اشرح كافة السلايدات الـ ${detectedSlides} كاملة من الشريحة 1 وحتى ${detectedSlides}:
+## 📄 السلايد 1: [عنوان السلايد]
+...`
+          : `اشرح وتتبع كافة شرائح المحاضرة بالتفصيل:
+## 📄 السلايد [الرقم]: [عنوان السلايد]`;
+
+        prompt = `أنت "المعيد الدحيح" وصاحب الطالب الجدع في الجامعة. مهمتك تفكيك وشرح هذه المحاضرة بعنوان "${material.title}"${courseName} بالكامل لكافة السلايدات دون أي تلخيص مخل ودون إهمال لأي صفحة أو فكرة أو مسألة!
+
+${slideCountInstruction}
+
+طريقة الشرح بالعامية المصرية البسيطة خالص (عامة ومفهومة للجميع):
+- اشرح بلغة عامية مصرية بيضاء وسلسة وسهلة جداً، كأنك بتشرح لواحد صاحبك ع القهوة أو في المدرج قبل الامتحان بساعة.
+- ابعد تماماً عن التقعير اللغوي أو رغي الكتب الجاف، وابعد عن الترجمة الحرفية الميتة للمصطلحات الإنجليزية.
+- ابدأ دايماً بفهم الفكرة بالبلدي ومن الآخر في كلمتين يفهمهم أي طالب حتى لو مستواه ضعيف أو مفتحش المادة من أول الترم (زي: "بص يا سيدي"، "تعال نفصص الحتة دي"، "الموضوع بسيط خالص"، "عارف يعني إيه كذا؟ يعني ببساطة...").
+
+التزم بهذا الهيكل الممتع والعبقري لكل سلايد:
+1. 🔍 **فكرة السلايد بالبلدي في كلمتين**: توضيح الفكرة المحورية بالعامية المصرية السلسة دون أي تقعير أو تعقيد.
+2. 📌 **المعطيات والبيانات الأصلية للسلايد**: تفريغ دقيق للأرقام والمصطلحات والرسومات أو الكود.
+3. 🧩 **تفكيك الألغاز والتريكات حتة حتة (تعال نفصصها بالبلدي)**:
+   * إذا كانت المسألة رياضية أو حسابية: فك التريكات خطوة بخطوة بالمعادلات ($...$ و $$...$$).
+   * إذا كانت المادة برمجية: فصص فكرة الكود واكتب الكود كاملاً مشروحاً مع ناتج التنفيذ والـ Edge Cases.
+   * إذا كانت المادة نظرية: أمثلة واقعية وجداول مقارنة.
+4. ⚠️ **ملحوظة دحيح / فخ الامتحان (Exam Trap)**: الأخطاء الشائعة وكيف يتعامل معها في ورقة الامتحان.
+5. 🎯 **تجميعة الحل النهائي (نموذج إجابة الامتحان)**: الحل الصافي والمنظم جداً أو الكود النهائي.
+
+في نهاية الشرح بالكامل، اختم بسؤال تفاعلي لطيف ومشجع (زي: "تحب نمسك أي مسألة من دول ونحلها سوا خطوة بخطوة كأنك في لجنة الامتحان؟").`;
       } else if (type === "summary") {
         prompt = `أنت "المعيد الدحيح" العبقري. لخص هذه المحاضرة بعنوان "${material.title}"${courseName} في ملخص كبسولة مركز وممتع بالعامية المصرية الراقية:
 1. 💡 الفكرة العامة للمحاضرة في سطرين بالبلدي ومن الآخر.
@@ -418,6 +564,7 @@ ${slideCountInstruction}
       }
     } finally {
       setLoading(false);
+      setGenerationProgress((prev) => ({ ...prev, isActive: false }));
     }
   };
 
@@ -982,7 +1129,7 @@ ${slideCountInstruction}
                 </div>
 
                 {/* Loading state */}
-                {loading ? (
+                {loading && parsedSlides.length === 0 ? (
                   <div className="py-20 text-center space-y-4">
                     <div className="relative w-16 h-16 mx-auto">
                       <div className="w-16 h-16 rounded-2xl bg-primary/10 border border-primary/20 text-primary flex items-center justify-center animate-pulse">
@@ -998,13 +1145,13 @@ ${slideCountInstruction}
                       </p>
                       <p className="text-xs text-muted-foreground leading-relaxed">
                         {lang === "ar"
-                          ? "نقوم باستخراج كل سلايد وصفحة، وكتابة شروحات تفصيلية لكل حرف، وأمثلة عملية وأكواد ومسائل وفخاخ الامتحانات دون أي اختصار مخل ✨"
-                          : "Extracting each slide, creating in-depth breakdowns, practical code, and exam tricks..."}
+                          ? "نقوم باستخراج السلايدات الأولى وتفكيك شروحاتها بالتفصيل بالعامية المصرية البسيطة، وستظهر لك فوراً للمذاكرة مع استكمال الباقي تلقائياً ✨"
+                          : "Extracting slides and creating in-depth breakdowns, they will appear immediately as each batch finishes..."}
                       </p>
                     </div>
                     <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-secondary text-xs text-muted-foreground border border-border/50">
                       <Zap className="w-3.5 h-3.5 text-amber-500" />
-                      <span>{lang === "ar" ? "قد يستغرق الشرح المفصل من 15 إلى 30 ثانية لدقته الفائقة" : "Takes ~15-30s for exhaustive depth"}</span>
+                      <span>{lang === "ar" ? "تجهيز أول دفعة سلايدات يستغرق ثوانٍ معدودة فقط" : "First batch takes only a few seconds"}</span>
                     </div>
                   </div>
                 ) : fullExplanation ? (
@@ -1033,34 +1180,113 @@ ${slideCountInstruction}
                     </div>
                   ) : (
                     <div className="space-y-4">
-                      {/* Banner if cached explanation has fewer slides than PDF */}
-                      {totalPdfPages > 4 && parsedSlides.filter((s) => !s.isIntro).length > 0 && parsedSlides.filter((s) => !s.isIntro).length < totalPdfPages && (
-                        <div className="p-3.5 rounded-xl bg-amber-500/15 border border-amber-500/35 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                      {/* Live Progressive Generation Banner */}
+                      {generationProgress.isActive && (
+                        <motion.div
+                          initial={{ opacity: 0, y: -8 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          className="p-3 sm:p-4 rounded-xl bg-gradient-to-r from-primary/15 via-primary/10 to-transparent border border-primary/30 space-y-2.5 shadow-sm"
+                        >
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                            <div className="flex items-center gap-2.5">
+                              <div className="w-7 h-7 rounded-lg bg-primary/20 text-primary flex items-center justify-center shrink-0">
+                                <Sparkles className="w-4 h-4 animate-spin text-primary" />
+                              </div>
+                              <div>
+                                <p className="text-xs sm:text-sm font-bold text-foreground flex items-center gap-2">
+                                  <span>{lang === "ar" ? "جاري استكمال شرح باقي السلايدات في الخلفية..." : "Generating remaining slides..."}</span>
+                                  <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-primary/20 text-primary">
+                                    {lang === "ar"
+                                      ? `تم إنهاء ${generationProgress.currentSlide} من ${generationProgress.totalSlides} سلايد`
+                                      : `${generationProgress.currentSlide} of ${generationProgress.totalSlides} ready`}
+                                  </span>
+                                </p>
+                                <p className="text-[11px] text-muted-foreground">
+                                  {lang === "ar"
+                                    ? `متبقي ${Math.max(0, generationProgress.totalSlides - generationProgress.currentSlide)} سلايد — يمكنك قراءة ومذاكرة السلايدات الجاهزة بالأسفل فوراً دون أي انتظار! ✨`
+                                    : `${Math.max(0, generationProgress.totalSlides - generationProgress.currentSlide)} slides remaining — you can read completed slides below!`}
+                                </p>
+                              </div>
+                            </div>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={handlePauseGeneration}
+                              className="h-7 text-xs gap-1.5 border-border/70 hover:bg-destructive/10 hover:text-destructive hover:border-destructive/40 font-medium self-end sm:self-auto shrink-0"
+                            >
+                              <Pause className="w-3.5 h-3.5" />
+                              <span>{lang === "ar" ? "إيقاف مؤقت والاحتفاظ بما تم" : "Pause & Keep"}</span>
+                            </Button>
+                          </div>
+
+                          {/* Live Animated Progress Bar */}
+                          <div className="space-y-1">
+                            <div className="w-full bg-secondary/80 h-2 rounded-full overflow-hidden border border-border/40">
+                              <div
+                                className="bg-primary h-full rounded-full transition-all duration-500 ease-out"
+                                style={{
+                                  width: `${Math.min(100, Math.round((generationProgress.currentSlide / Math.max(1, generationProgress.totalSlides)) * 100))}%`,
+                                }}
+                              />
+                            </div>
+                            <div className="flex justify-between items-center text-[10px] text-muted-foreground px-0.5 font-mono">
+                              <span>
+                                {lang === "ar"
+                                  ? `دفعة ${generationProgress.currentBatch} من ${generationProgress.totalBatches}`
+                                  : `Batch ${generationProgress.currentBatch} of ${generationProgress.totalBatches}`}
+                              </span>
+                              <span className="font-bold text-primary">
+                                {Math.min(100, Math.round((generationProgress.currentSlide / Math.max(1, generationProgress.totalSlides)) * 100))}%
+                              </span>
+                            </div>
+                          </div>
+                        </motion.div>
+                      )}
+
+                      {/* Banner if cached explanation has fewer slides than PDF and generation is not active */}
+                      {!generationProgress.isActive && totalPdfPages > 4 && parsedSlides.filter((s) => !s.isIntro).length > 0 && parsedSlides.filter((s) => !s.isIntro).length < totalPdfPages && (
+                        <div className="p-3.5 rounded-xl bg-amber-500/15 border border-amber-500/35 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs shadow-xs">
                           <div className="flex items-start sm:items-center gap-2.5">
                             <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5 sm:mt-0" />
                             <div>
                               <p className="font-bold text-amber-600 dark:text-amber-400">
                                 {lang === "ar"
-                                  ? `⚠️ تنبيه: الشرح المحفوظ حالياً يغطي (${parsedSlides.filter((s) => !s.isIntro).length}) فقط من أصل (${totalPdfPages}) سلايد في ملف المحاضرة!`
-                                  : `⚠️ Notice: Current explanation covers (${parsedSlides.filter((s) => !s.isIntro).length}) of (${totalPdfPages}) slides!`}
+                                  ? `⚠️ تم شرح (${parsedSlides.filter((s) => !s.isIntro).length}) فقط من أصل (${totalPdfPages}) سلايد في ملف المحاضرة!`
+                                  : `⚠️ Currently explained (${parsedSlides.filter((s) => !s.isIntro).length}) of (${totalPdfPages}) slides!`}
                               </p>
                               <p className="text-[11px] text-muted-foreground">
                                 {lang === "ar"
-                                  ? `اضغط الزر لشرح وتفكيك كل السلايدات الـ (${totalPdfPages}) بالكامل دون أي اختصار.`
-                                  : "Click to generate the exhaustive explanation for all slides."}
+                                  ? `يمكنك استكمال باقي السلايدات من حيث توقفت، أو إعادة التفكيك كاملاً من البداية.`
+                                  : "You can resume remaining slides or restart from the beginning."}
                               </p>
                             </div>
                           </div>
-                          <Button
-                            size="sm"
-                            variant="default"
-                            onClick={() => handleGenerate("full_explain", true)}
-                            disabled={loading}
-                            className="h-8 text-xs font-bold gap-1.5 bg-amber-600 hover:bg-amber-700 text-white shrink-0 shadow-xs"
-                          >
-                            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
-                            <span>{lang === "ar" ? `شرح الـ (${totalPdfPages}) سلايد كاملة 🚀` : `Explain All (${totalPdfPages}) Slides 🚀`}</span>
-                          </Button>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <Button
+                              size="sm"
+                              variant="default"
+                              onClick={() => handleGenerate("full_explain", false, parsedSlides.filter((s) => !s.isIntro).length + 1)}
+                              disabled={loading}
+                              className="h-8 text-xs font-bold gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs"
+                            >
+                              <Sparkles className="w-3.5 h-3.5" />
+                              <span>
+                                {lang === "ar"
+                                  ? `استكمال باقي السلايدات (${parsedSlides.filter((s) => !s.isIntro).length + 1} إلى ${totalPdfPages}) 🚀`
+                                  : `Resume (${parsedSlides.filter((s) => !s.isIntro).length + 1} to ${totalPdfPages}) 🚀`}
+                              </span>
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => handleGenerate("full_explain", true)}
+                              disabled={loading}
+                              className="h-8 text-xs font-medium gap-1 text-muted-foreground hover:text-foreground"
+                            >
+                              <RotateCcw className="w-3 h-3" />
+                              <span>{lang === "ar" ? "من البداية" : "Restart"}</span>
+                            </Button>
+                          </div>
                         </div>
                       )}
 
