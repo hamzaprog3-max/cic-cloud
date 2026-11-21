@@ -397,6 +397,75 @@ function formatAuditLog(row: Record<string, any>) {
   };
 }
 
+// ============ LEGACY SUPABASE MODERATOR SYNC ============
+async function syncLegacyModeratorsWithToken(
+  sbAccessToken: string,
+  env: Env
+): Promise<{ synced: number; accessSynced: number }> {
+  let synced = 0;
+  let accessSynced = 0;
+  try {
+    const headers = {
+      apikey: LEGACY_SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${sbAccessToken}`,
+    };
+
+    const modsRes = await fetch(`${LEGACY_SUPABASE_URL}/rest/v1/moderators?select=*`, { headers });
+    if (modsRes.ok) {
+      const mods = (await modsRes.json().catch(() => [])) as any[];
+      if (Array.isArray(mods) && mods.length > 0) {
+        for (const m of mods) {
+          if (!m?.id || !m?.username) continue;
+          const existing = await env.DB.prepare("SELECT id FROM moderators WHERE id = ? OR lower(username) = ?")
+            .bind(m.id, String(m.username).trim().toLowerCase())
+            .first();
+          if (!existing) {
+            await env.DB.prepare(
+              "INSERT INTO moderators (id, username, password_hash, display_name, permissions, department_id, academic_year, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            )
+              .bind(
+                m.id,
+                String(m.username).trim(),
+                String(m.password || "LEGACY_SUPABASE_AUTH"),
+                String(m.display_name || m.username),
+                JSON.stringify(Array.isArray(m.permissions) ? m.permissions : []),
+                m.department_id ?? null,
+                String(m.academic_year || "1"),
+                m.created_at || new Date().toISOString()
+              )
+              .run();
+            synced++;
+          }
+        }
+      }
+    }
+
+    const accRes = await fetch(`${LEGACY_SUPABASE_URL}/rest/v1/moderator_course_access?select=*`, { headers });
+    if (accRes.ok) {
+      const acc = (await accRes.json().catch(() => [])) as any[];
+      if (Array.isArray(acc) && acc.length > 0) {
+        for (const a of acc) {
+          if (!a?.id || !a?.moderator_id || !a?.course_id) continue;
+          const existing = await env.DB.prepare("SELECT id FROM moderator_course_access WHERE id = ?")
+            .bind(a.id)
+            .first();
+          if (!existing) {
+            await env.DB.prepare(
+              "INSERT INTO moderator_course_access (id, moderator_id, course_id, created_at) VALUES (?, ?, ?, ?)"
+            )
+              .bind(a.id, a.moderator_id, a.course_id, a.created_at || new Date().toISOString())
+              .run();
+            accessSynced++;
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("syncLegacyModeratorsWithToken error:", err);
+  }
+  return { synced, accessSynced };
+}
+
 // ============ AUTH HANDLERS ============
 async function handleAuthLogin(request: Request, env: Env): Promise<Response> {
   const body = (await request.json().catch(() => null)) as { username?: string; password?: string } | null;
@@ -409,28 +478,21 @@ async function handleAuthLogin(request: Request, env: Env): Promise<Response> {
   const cleanUser = rawUser.toLowerCase();
   const cleanPass = rawPass.trim();
 
-  // 1. Check configured env owner credentials or emergency master owner credentials
-  const envOwnerMatch =
-    env.OWNER_USERNAME &&
-    env.OWNER_PASSWORD &&
-    cleanUser === env.OWNER_USERNAME.trim().toLowerCase() &&
-    rawPass === env.OWNER_PASSWORD;
-
-  const isMasterUser = ["owner", "hamza", "admin", "hamza6454645@gmail.com", "cic", "superadmin"].includes(cleanUser);
-  const isMasterPass = ["cic2026", "admin2026", "hamza2026", "admin", "hamza", "owner", "123456", "cic"].includes(cleanPass);
-
-  if (envOwnerMatch || (isMasterUser && isMasterPass)) {
-    const token = await createToken({ role: "owner", displayName: "المالك" }, env);
-    return jsonResponse({ role: "owner", displayName: "المالك", token }, 200, request);
-  }
-
-  // 2. Check D1 moderators table
+  // 1. Check D1 moderators table first (if password is already hashed in D1 with salted SHA-256)
+  let existingD1Mod: Record<string, any> | null = null;
   try {
-    const mod = await env.DB.prepare("SELECT * FROM moderators WHERE lower(username) = ?")
+    existingD1Mod = await env.DB.prepare("SELECT * FROM moderators WHERE lower(username) = ?")
       .bind(cleanUser)
       .first<Record<string, any>>();
-    if (mod && (await verifyPasswordHash(rawPass, String(mod.password_hash || "")))) {
-      const formatted = formatModerator(mod);
+    const storedHash = String(existingD1Mod?.password_hash || "");
+    if (
+      existingD1Mod &&
+      storedHash &&
+      !storedHash.startsWith("$2") &&
+      storedHash !== "LEGACY_SUPABASE_AUTH" &&
+      (await verifyPasswordHash(rawPass, storedHash))
+    ) {
+      const formatted = formatModerator(existingD1Mod);
       const token = await createToken(
         {
           role: "moderator",
@@ -460,7 +522,7 @@ async function handleAuthLogin(request: Request, env: Env): Promise<Response> {
     console.warn("D1 moderator lookup failed:", err);
   }
 
-  // 3. Fallback: verify against legacy Supabase admin-login so existing Supabase owner/moderator passwords still work!
+  // 2. Verify against legacy Supabase admin-login (works for BOTH real Owner & all existing Moderators!)
   try {
     const sbRes = await fetch(`${LEGACY_SUPABASE_URL}/functions/v1/admin-login`, {
       method: "POST",
@@ -473,26 +535,88 @@ async function handleAuthLogin(request: Request, env: Env): Promise<Response> {
     });
     const sbData = (await sbRes.json().catch(() => null)) as any;
     if (sbRes.ok && sbData?.role) {
+      if (sbData.role === "owner") {
+        // Automatically import all existing moderators & course access from Supabase into D1!
+        let syncResult = { synced: 0, accessSynced: 0 };
+        if (sbData.session?.access_token) {
+          syncResult = await syncLegacyModeratorsWithToken(sbData.session.access_token, env);
+        }
+        const token = await createToken({ role: "owner", displayName: "المالك" }, env);
+        return jsonResponse(
+          {
+            role: "owner",
+            displayName: "المالك",
+            token,
+            syncedModerators: syncResult.synced,
+          },
+          200,
+          request
+        );
+      }
+
+      // Moderator authenticated via Supabase -> auto-sync/upgrade into D1 immediately!
+      const pwHash = await hashPassword(rawPass);
+      let modProfile = {
+        id: sbData.moderatorId || crypto.randomUUID(),
+        display_name: sbData.displayName || rawUser,
+        permissions: Array.isArray(sbData.permissions) ? sbData.permissions : [],
+        department_id: sbData.departmentId ?? null,
+        academic_year: String(sbData.academicYear || "1"),
+      };
+
+      try {
+        if (existingD1Mod) {
+          // Keep D1 permissions/dept/year (in case owner edited them in D1), just upgrade password_hash
+          const formatted = formatModerator(existingD1Mod);
+          modProfile = {
+            id: formatted.id,
+            display_name: formatted.display_name,
+            permissions: formatted.permissions,
+            department_id: formatted.department_id,
+            academic_year: formatted.academic_year,
+          };
+          await env.DB.prepare("UPDATE moderators SET password_hash = ? WHERE id = ?")
+            .bind(pwHash, formatted.id)
+            .run();
+        } else {
+          await env.DB.prepare(
+            "INSERT OR IGNORE INTO moderators (id, username, password_hash, display_name, permissions, department_id, academic_year, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+          )
+            .bind(
+              modProfile.id,
+              rawUser,
+              pwHash,
+              modProfile.display_name,
+              JSON.stringify(modProfile.permissions),
+              modProfile.department_id,
+              modProfile.academic_year,
+              new Date().toISOString()
+            )
+            .run();
+        }
+      } catch (e) {
+        console.warn("Auto-upsert legacy moderator to D1 failed:", e);
+      }
+
       const token = await createToken(
         {
-          role: sbData.role === "owner" ? "owner" : "moderator",
-          moderatorId: sbData.moderatorId,
-          displayName: sbData.displayName || (sbData.role === "owner" ? "المالك" : "مشرف"),
-          permissions: sbData.permissions || [],
-          departmentId: sbData.departmentId ?? null,
-          academicYear: sbData.academicYear || "1",
+          role: "moderator",
+          moderatorId: modProfile.id,
+          displayName: modProfile.display_name,
+          permissions: modProfile.permissions,
+          departmentId: modProfile.department_id,
+          academicYear: modProfile.academic_year,
         },
         env
       );
       return jsonResponse(
         {
-          role: sbData.role,
-          moderatorId: sbData.moderatorId,
-          displayName: sbData.displayName || (sbData.role === "owner" ? "المالك" : "مشرف"),
-          permissions: sbData.permissions || [],
-          departmentId: sbData.departmentId ?? null,
-          academicYear: sbData.academicYear || "1",
-          session: sbData.session || null,
+          role: "moderator",
+          moderatorId: modProfile.id,
+          displayName: modProfile.display_name,
+          permissions: modProfile.permissions,
+          departmentId: modProfile.department_id,
+          academicYear: modProfile.academic_year,
           token,
         },
         200,
@@ -501,6 +625,21 @@ async function handleAuthLogin(request: Request, env: Env): Promise<Response> {
     }
   } catch (err) {
     console.warn("Legacy Supabase auth check failed:", err);
+  }
+
+  // 3. Fallback: check env owner credentials or emergency master owner credentials
+  const envOwnerMatch =
+    env.OWNER_USERNAME &&
+    env.OWNER_PASSWORD &&
+    cleanUser === env.OWNER_USERNAME.trim().toLowerCase() &&
+    rawPass === env.OWNER_PASSWORD;
+
+  const isMasterUser = ["owner", "hamza", "admin", "hamza6454645@gmail.com", "cic", "superadmin"].includes(cleanUser);
+  const isMasterPass = ["cic2026", "admin2026", "hamza2026", "admin", "hamza", "owner", "123456", "cic"].includes(cleanPass);
+
+  if (envOwnerMatch || (isMasterUser && isMasterPass)) {
+    const token = await createToken({ role: "owner", displayName: "المالك" }, env);
+    return jsonResponse({ role: "owner", displayName: "المالك", token }, 200, request);
   }
 
   return jsonResponse({ error: "اسم المستخدم أو كلمة المرور غير صحيحة" }, 401, request);
