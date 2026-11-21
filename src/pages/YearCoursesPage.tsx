@@ -72,11 +72,14 @@ const YearCoursesPage = () => {
 
   const sharedCourses = allCourses.filter(c => sharedCourseIds.includes(c.id));
   
-  // If we have a deptId, show deptCourses + sharedCourses.
-  // Otherwise (Year 2, 3 & 4 direct), show all courses.
-  const rawCourses = deptId ? [...deptCourses, ...sharedCourses] : allCourses;
+  // Year 1 is foundational and shared across all departments (CS & Cyber).
+  // Year 2 Semester 1 core courses are also shared across departments.
+  const isCommonYearOrCore = yearId === "1" || (yearId === "2" && semesterId === "1");
+  const rawCourses = isCommonYearOrCore
+    ? allCourses
+    : (targetDeptId ? [...deptCourses, ...sharedCourses] : allCourses);
   
-  // Filter by year and semester (with fallbacks for older data)
+  // Filter strictly by year and semester (never leak courses from one semester into another)
   const inYear = rawCourses.filter(c => 
     (c.academic_year || "1") === yearId && 
     c.code !== "BACHELOR-PROG"
@@ -85,7 +88,7 @@ const YearCoursesPage = () => {
     ? inYear
     : inYear.filter(c => (c.semester || "1") === semesterId);
 
-  const courses = inSemester.length > 0 ? inSemester : inYear;
+  const courses = inSemester;
 
   const department = departments.find(d => d.id === deptId || d.id === targetDeptId);
 
