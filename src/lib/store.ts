@@ -339,11 +339,12 @@ export const db = {
     return fallbackCourses;
   },
   getCoursesByDepartment: async (departmentId: string): Promise<Course[]> => {
+    const targetId = departmentId === "cs-dept-id" ? "9eaab1c7-37e2-44a4-afbe-738586d50835" : departmentId;
     try {
-      const { data, error } = await supabase.from("courses").select("*").eq("department_id", departmentId).order("created_at");
+      const { data, error } = await supabase.from("courses").select("*").eq("department_id", targetId).order("created_at");
       if (!error && data && data.length > 0) return data as Course[];
     } catch {}
-    return fallbackCourses.filter(c => !departmentId || c.department_id === departmentId || !c.department_id);
+    return fallbackCourses.filter(c => !targetId || c.department_id === targetId || !c.department_id);
   },
   addCourse: async (course: { name: string; code: string; description: string; description_ar?: string; department_id?: string | null; academic_year: string; semester: string; notes?: string | null }) => {
     const { data: existing } = await supabase.from("courses").select("id");

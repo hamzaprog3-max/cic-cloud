@@ -46,17 +46,20 @@ const YearCoursesPage = () => {
     initialData: fallbackDepartments,
   });
 
+  const targetDeptId = deptId === "cs-dept-id" ? "9eaab1c7-37e2-44a4-afbe-738586d50835" : deptId;
+
   const { data: deptCourses = [] } = useQuery({
-    queryKey: ["courses", "department", deptId],
-    queryFn: () => db.getCoursesByDepartment(deptId!),
-    enabled: !!deptId,
+    queryKey: ["courses", "department", targetDeptId],
+    queryFn: () => db.getCoursesByDepartment(targetDeptId!),
+    initialData: () => fallbackCourses.filter(c => !targetDeptId || c.department_id === targetDeptId || !c.department_id),
+    enabled: !!targetDeptId,
   });
 
   // Get shared course IDs for this department
   const { data: sharedCourseIds = [] } = useQuery({
-    queryKey: ["shared-dept-courses", deptId],
-    queryFn: () => db.getSharedCoursesForDept(deptId!),
-    enabled: !!deptId,
+    queryKey: ["shared-dept-courses", targetDeptId],
+    queryFn: () => db.getSharedCoursesForDept(targetDeptId!),
+    enabled: !!targetDeptId && targetDeptId !== "cs-dept-id",
   });
 
   // Get the actual shared courses (or all courses if no deptId)
@@ -84,7 +87,7 @@ const YearCoursesPage = () => {
 
   const courses = inSemester.length > 0 ? inSemester : inYear;
 
-  const department = departments.find(d => d.id === deptId);
+  const department = departments.find(d => d.id === deptId || d.id === targetDeptId);
 
   // Save department context for schedule page and notifications
   useQuery({
