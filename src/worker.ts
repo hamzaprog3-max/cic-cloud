@@ -1536,6 +1536,18 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
+    // Canonical redirect: www.cic-cloud.com -> https://cic-cloud.com (ensures single fresh version & unified session)
+    if (url.hostname === "www.cic-cloud.com") {
+      const target = `https://cic-cloud.com${url.pathname}${url.search}`;
+      return new Response(null, {
+        status: 301,
+        headers: {
+          Location: target,
+          "Cache-Control": "no-store",
+        },
+      });
+    }
+
     // CORS preflight for all /api/* routes
     if (url.pathname.startsWith("/api/") && request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: getCorsHeaders(request) });

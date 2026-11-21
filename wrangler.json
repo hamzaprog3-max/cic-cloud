@@ -27,6 +27,10 @@
     {
       "pattern": "cic-cloud.com",
       "custom_domain": true
+    },
+    {
+      "pattern": "www.cic-cloud.com",
+      "custom_domain": true
     }
   ],
   "workers_dev": true
