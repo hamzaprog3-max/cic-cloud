@@ -44,10 +44,13 @@ export function coursePath(course: SlugCourse, allCourses: SlugCourse[] = []) {
   return `/${course.academic_year || "1"}/${course.semester || "2"}/${courseSlug(course, allCourses)}`;
 }
 
-/** Find the course a URL slug points to (supports old links without the suffix). */
+/** Find the course a URL slug points to (supports cross-semester links and old links without the suffix). */
 export function findCourseBySlug<T extends SlugCourse>(courses: T[], yearId: string, semesterId: string, slug: string): T | undefined {
   const inTerm = courses.filter((c) => (c.academic_year || "1") === yearId && (c.semester || "2") === semesterId);
-  return inTerm.find((c) => courseSlug(c, courses) === slug) || inTerm.find((c) => slugify(c.name) === slug);
+  const matched = inTerm.find((c) => courseSlug(c, courses) === slug) || inTerm.find((c) => slugify(c.name) === slug);
+  if (matched) return matched;
+  const inYear = courses.filter((c) => (c.academic_year || "1") === yearId);
+  return inYear.find((c) => courseSlug(c, courses) === slug) || inYear.find((c) => slugify(c.name) === slug);
 }
 
 /** Turn whatever an admin typed ("t.me/x", "www.site.com", "/schedule", "https://…") into a usable link. */
