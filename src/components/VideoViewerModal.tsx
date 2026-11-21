@@ -14,6 +14,7 @@ import { toast } from "sonner";
 import { useState, useCallback, useEffect } from "react";
 import { cn } from "@/lib/utils";
 import { useOfflineStorage } from "@/hooks/use-offline-storage";
+import { toR2ViewUrl, toR2DownloadUrl } from "@/lib/r2";
 
 interface VideoViewerModalProps {
   open: boolean;
@@ -52,7 +53,7 @@ const VideoViewerModal = ({
         objectUrl = cachedUrl;
         setActualVideoUrl(cachedUrl);
       } else {
-        setActualVideoUrl(videoUrl);
+        setActualVideoUrl(toR2ViewUrl(videoUrl));
       }
 
       if ('mediaSession' in navigator) {
@@ -87,7 +88,8 @@ const VideoViewerModal = ({
     playClickSfx();
     try {
       toast.loading(t("material.downloading"), { id: "dl-viewer" });
-      const res = await fetch(videoUrl);
+      const dlTarget = toR2DownloadUrl(videoUrl, isAudio ? fileName.replace('.mp4', '.mp3') : fileName);
+      const res = await fetch(dlTarget);
       if (!res.ok) throw new Error("fetch failed");
       const blob = await res.blob();
       const a = document.createElement("a");

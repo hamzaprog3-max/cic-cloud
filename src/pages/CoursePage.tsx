@@ -12,6 +12,7 @@ import { ArrowRight, ArrowLeft, FolderDown, Share2 } from "lucide-react";
 import { toast } from "sonner";
 import { playBackSfx, playClickSfx } from "@/hooks/use-sfx";
 import { slugify, findCourseBySlug } from "@/lib/utils";
+import { toR2ViewUrl } from "@/lib/r2";
 
 
 const CoursePage = () => {
@@ -142,7 +143,7 @@ const CoursePage = () => {
       await Promise.all(
         pdfMaterials.map(async (m) => {
           try {
-            const res = await fetch(m.pdf_url!);
+            const res = await fetch(toR2ViewUrl(m.pdf_url!));
             if (!res.ok) return;
             const blob = await res.blob();
             

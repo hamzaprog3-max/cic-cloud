@@ -91,8 +91,8 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
 
   try {
     const body: any = await request.json().catch(() => ({}));
+    let { prompt } = body;
     const {
-      prompt,
       pdfUrl,
       listContent,
       history,

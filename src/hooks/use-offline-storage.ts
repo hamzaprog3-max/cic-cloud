@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { toR2ViewUrl } from '@/lib/r2';
 
 const CACHE_NAME = 'cic-offline-materials-v2';
 
@@ -44,7 +45,7 @@ export function useOfflineStorage() {
   const saveToOffline = useCallback(async (url: string, onProgress?: (pct: number) => void, signal?: AbortSignal) => {
     if (!isSupported) return false;
     try {
-      const response = await fetch(url, { mode: 'cors', signal });
+      const response = await fetch(toR2ViewUrl(url), { mode: 'cors', signal });
       if (!response.ok) throw new Error('Fetch failed');
       
       const contentLength = response.headers.get('content-length');

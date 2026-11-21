@@ -44,6 +44,7 @@ import {
 } from "lucide-react";
 import { FormattedAiText } from "@/components/FormattedAiText";
 import { exportToWordDocument, exportToPdfPrint } from "@/lib/export-doc";
+import { toR2ViewUrl } from "@/lib/r2";
 import { toast } from "sonner";
 import { useI18n } from "@/lib/i18n";
 import {
@@ -70,7 +71,7 @@ import {
 const detectPdfPageCount = async (pdfUrl?: string | null): Promise<number> => {
   if (!pdfUrl) return 0;
   try {
-    const res = await fetch(pdfUrl);
+    const res = await fetch(toR2ViewUrl(pdfUrl));
     if (!res.ok) return 0;
     const arrayBuffer = await res.arrayBuffer();
     const rawText = new TextDecoder("latin1").decode(new Uint8Array(arrayBuffer));

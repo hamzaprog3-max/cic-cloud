@@ -34,6 +34,7 @@ import { playClickSfx } from "@/hooks/use-sfx";
 import { useState, useMemo, lazy, Suspense } from "react";
 import { OfflineMaterialButton } from "./OfflineMaterialButton";
 import { downloadFileDirectly } from "@/lib/download";
+import { toR2DownloadUrl, isR2Url } from "@/lib/r2";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
@@ -281,18 +282,11 @@ const MaterialCard = ({
     const getDownloadUrl = (url: string) => {
       try {
         const urlObj = new URL(url);
-        if (
-          urlObj.hostname.includes("r2.dev") ||
-          urlObj.hostname.includes("r2.cloudflarestorage.com")
-        ) {
+        if (isR2Url(url)) {
           const key = decodeURIComponent(urlObj.pathname.replace(/^\/+/, ""));
           const filename = key.split("/").pop() || key;
           const name = buildDownloadName(filename);
-          const apiBase =
-            typeof window !== "undefined" && window.location.hostname.includes("cic-cloud.com")
-              ? ""
-              : "https://cic-cloud.com";
-          return `${apiBase}/api/r2/download?key=${encodeURIComponent(key)}&name=${encodeURIComponent(name)}`;
+          return toR2DownloadUrl(url, name);
         }
         if (urlObj.hostname.includes("supabase.co")) {
           const pathParts = urlObj.pathname.split("/");

@@ -1,40 +1,72 @@
-// Auth store (localStorage for UI state) + types + Supabase data helpers
-import { supabase } from "@/integrations/supabase/client";
+// Unified Auth + Live Cloudflare D1 Database & Cloudflare R2 Storage client
 import fallbackData from "@/data/fallback-data.json";
+import { getWorkerApiBase, uploadFileToR2 } from "@/lib/r2";
 
 export const fallbackDepartments: Department[] = (fallbackData.departments || []) as Department[];
 export const fallbackCategories: MaterialCategory[] = (fallbackData.categories || []) as MaterialCategory[];
 export const fallbackCourses: Course[] = (fallbackData.courses || []) as Course[];
 export const fallbackMaterials: Material[] = (fallbackData.materials || []) as Material[];
 
-// ============ RESILIENT LOCAL PERSISTENCE STORAGE ============
-const STORAGE_KEYS = {
-  ADDED_MATERIALS: "lms_added_materials",
-  UPDATED_MATERIALS: "lms_updated_materials",
-  DELETED_MATERIALS: "lms_deleted_materials",
-  ARCHIVED_MATERIALS: "lms_archived_materials",
-  ADDED_COURSES: "lms_added_courses",
-  UPDATED_COURSES: "lms_updated_courses",
-  DELETED_COURSES: "lms_deleted_courses",
-  ADDED_LINKS: "lms_added_links",
-  DELETED_LINKS: "lms_deleted_links",
-};
-
-function getLocalJson<T>(key: string, defaultValue: T): T {
-  try {
-    const val = localStorage.getItem(key);
-    return val ? JSON.parse(val) : defaultValue;
-  } catch {
-    return defaultValue;
+// Clean up any legacy offline-hack localStorage keys from previous broken builds
+if (typeof localStorage !== "undefined") {
+  const legacyKeys = [
+    "lms_added_materials",
+    "lms_updated_materials",
+    "lms_deleted_materials",
+    "lms_archived_materials",
+    "lms_added_courses",
+    "lms_updated_courses",
+    "lms_deleted_courses",
+    "lms_added_links",
+    "lms_deleted_links",
+    "lms_emergency_auth",
+  ];
+  for (const k of legacyKeys) {
+    try {
+      localStorage.removeItem(k);
+    } catch {}
   }
 }
 
-function setLocalJson<T>(key: string, value: T): void {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch (e) {
-    console.warn(`Failed to save to localStorage for ${key}`, e);
+const API_BASE = () => getWorkerApiBase();
+
+function getAuthHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...(extra || {}) };
+  const token = typeof localStorage !== "undefined" ? localStorage.getItem("lms_token") : null;
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
   }
+  return headers;
+}
+
+async function apiGet<T>(path: string): Promise<T> {
+  const res = await fetch(`${API_BASE()}${path}`, {
+    method: "GET",
+    headers: getAuthHeaders(),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => null);
+    throw new Error(err?.error || `Request failed (${res.status})`);
+  }
+  return (await res.json()) as T;
+}
+
+async function apiMutate<T = unknown>(
+  path: string,
+  method: "POST" | "PATCH" | "PUT" | "DELETE",
+  body?: unknown
+): Promise<T> {
+  const res = await fetch(`${API_BASE()}${path}`, {
+    method,
+    headers: getAuthHeaders(body !== undefined ? { "Content-Type": "application/json" } : undefined),
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    throw new Error(data?.error || `فشل تنفيذ العملية (${res.status})`);
+  }
+  return data as T;
 }
 
 export type Permission =
@@ -192,6 +224,12 @@ const COURSE_COLORS = [
   "150 60% 45%", "210 70% 50%", "0 70% 55%", "280 60% 50%",
 ];
 
+function normalizeDeptId(departmentId: string): string {
+  if (departmentId === "cs-dept-id") return "9eaab1c7-37e2-44a4-afbe-738586d50835";
+  if (departmentId === "ai-cyber-dept-id") return "ca4069a4-fc50-4e96-8fb7-c1f4ea67da4f";
+  return departmentId;
+}
+
 // ============ AUTH ============
 export const auth = {
   getCurrentUser: (): CurrentUser => {
@@ -214,26 +252,23 @@ export const auth = {
   },
   isLoggedIn: (): boolean => {
     const role = localStorage.getItem("lms_role");
-    return role === "owner" || role === "moderator";
+    const token = localStorage.getItem("lms_token");
+    return (role === "owner" || role === "moderator") && Boolean(token);
   },
-  // Verifies that a valid session exists. Never prematurely kicks out
-  // an owner or moderator with a valid local login.
   hasValidSession: async (): Promise<boolean> => {
+    const token = localStorage.getItem("lms_token");
+    if (!token) return false;
     try {
-      const { data } = await supabase.auth.getSession();
-      const session = data?.session;
-      if (session) {
-        const appRole = (session.user?.app_metadata as any)?.app_role;
-        const userRole = (session.user?.user_metadata as any)?.app_role || (session.user?.user_metadata as any)?.role;
-        if (appRole === "owner" || appRole === "moderator" || userRole === "owner" || userRole === "moderator") {
-          return true;
-        }
-      }
-      const localRole = localStorage.getItem("lms_role");
-      return localRole === "owner" || localRole === "moderator";
+      const res = await fetch(`${API_BASE()}/api/auth/verify`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) return true;
+      if (res.status === 401 || res.status === 403) return false;
+      // Network/5xx transient error — don't kick user out
+      return true;
     } catch {
-      const localRole = localStorage.getItem("lms_role");
-      return localRole === "owner" || localRole === "moderator";
+      return Boolean(token);
     }
   },
   isOwner: (): boolean => localStorage.getItem("lms_role") === "owner",
@@ -246,364 +281,165 @@ export const auth = {
   },
   login: async (username: string, password: string): Promise<{ success: boolean; error?: string }> => {
     try {
-      const cleanUser = username.trim().toLowerCase();
-      const cleanPass = password.trim();
+      const response = await fetch(`${API_BASE()}/api/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username.trim(), password }),
+      });
+      const data = await response.json().catch(() => null);
 
-      // Master Emergency Owner Credentials (instant bypass when backend edge function has issues)
-      const isMasterUser = [
-        "owner", "hamza", "admin", "hamza6454645@gmail.com", "cic", "superadmin"
-      ].includes(cleanUser);
-      const isMasterPass = [
-        "cic2026", "admin2026", "hamza2026", "admin", "hamza", "owner", "123456", "cic"
-      ].includes(cleanPass);
-
-      if (isMasterUser && isMasterPass) {
-        localStorage.setItem("lms_role", "owner");
-        localStorage.setItem("lms_emergency_auth", "true");
-        localStorage.removeItem("lms_mod_id");
-        localStorage.removeItem("lms_mod_perms");
-        localStorage.removeItem("lms_mod_name");
-        localStorage.removeItem("lms_mod_dept");
-        localStorage.removeItem("lms_mod_year");
-        console.log('[auth] Master Owner logged in successfully');
-        return { success: true };
-      }
-
-      // Try Edge Function
-      try {
-        const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/admin-login`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-          },
-          body: JSON.stringify({ username: username.trim(), password }),
-        });
-
-        const data = await response.json().catch(() => null);
-
-        if (response.ok && data?.role) {
-          if (data.session) {
-            await supabase.auth.setSession({
-              access_token: data.session.access_token,
-              refresh_token: data.session.refresh_token,
-            });
-          }
-
-          localStorage.setItem("lms_role", data.role);
-          if (data.role === "moderator") {
-            localStorage.setItem("lms_mod_id", data.moderatorId || "");
-            localStorage.setItem("lms_mod_perms", JSON.stringify(data.permissions || []));
-            localStorage.setItem("lms_mod_name", data.displayName || "مشرف");
-            localStorage.setItem("lms_mod_dept", data.departmentId || "");
-            localStorage.setItem("lms_mod_year", data.academicYear || "1");
-          } else {
-            localStorage.removeItem("lms_mod_id");
-            localStorage.removeItem("lms_mod_perms");
-            localStorage.removeItem("lms_mod_name");
-            localStorage.removeItem("lms_mod_dept");
-            localStorage.removeItem("lms_mod_year");
-          }
-          return { success: true };
+      if (response.ok && data?.role && data?.token) {
+        localStorage.setItem("lms_token", data.token);
+        localStorage.setItem("lms_role", data.role);
+        if (data.role === "moderator") {
+          localStorage.setItem("lms_mod_id", data.moderatorId || "");
+          localStorage.setItem("lms_mod_perms", JSON.stringify(data.permissions || []));
+          localStorage.setItem("lms_mod_name", data.displayName || "مشرف");
+          localStorage.setItem("lms_mod_dept", data.departmentId || "");
+          localStorage.setItem("lms_mod_year", data.academicYear || "1");
+        } else {
+          localStorage.removeItem("lms_mod_id");
+          localStorage.removeItem("lms_mod_perms");
+          localStorage.removeItem("lms_mod_name");
+          localStorage.removeItem("lms_mod_dept");
+          localStorage.removeItem("lms_mod_year");
         }
-      } catch (edgeErr) {
-        console.warn('[auth] Edge function call failed, checking fallback', edgeErr);
-      }
-
-      // Fallback check if edge function is down or returned error
-      if (isMasterUser || cleanPass === "cic2026" || cleanPass === "admin2026" || cleanPass === "hamza2026") {
-        localStorage.setItem("lms_role", "owner");
-        localStorage.setItem("lms_emergency_auth", "true");
-        localStorage.removeItem("lms_mod_id");
-        localStorage.removeItem("lms_mod_perms");
-        localStorage.removeItem("lms_mod_name");
-        localStorage.removeItem("lms_mod_dept");
-        localStorage.removeItem("lms_mod_year");
         return { success: true };
       }
 
-      return { success: false, error: "اسم المستخدم أو كلمة المرور غير صحيحة" };
+      return { success: false, error: data?.error || "اسم المستخدم أو كلمة المرور غير صحيحة" };
     } catch (err) {
-      console.error('[auth] Login exception:', err);
+      console.error("[auth] Login exception:", err);
       return { success: false, error: "حدث خطأ في الاتصال — تأكد من اتصال الإنترنت" };
     }
   },
   logout: () => {
+    localStorage.removeItem("lms_token");
     localStorage.removeItem("lms_role");
-    localStorage.removeItem("lms_emergency_auth");
     localStorage.removeItem("lms_mod_id");
     localStorage.removeItem("lms_mod_perms");
     localStorage.removeItem("lms_mod_name");
     localStorage.removeItem("lms_mod_dept");
     localStorage.removeItem("lms_mod_year");
-    supabase.auth.signOut().catch(() => {});
   },
 };
 
-// ============ DATA API ============
+// ============ DATA API (Live Cloudflare D1 + R2) ============
 export const db = {
   // Departments
   getDepartments: async (): Promise<Department[]> => {
     try {
-      const { data, error } = await supabase.from("departments").select("*").order("created_at");
-      if (!error && data && data.length > 0) return data as Department[];
-    } catch {}
+      const data = await apiGet<Department[]>("/api/db/departments");
+      if (Array.isArray(data) && data.length > 0) return data;
+    } catch (e) {
+      console.warn("getDepartments fallback:", e);
+    }
     return fallbackDepartments;
   },
 
   // Material Categories
   getCategories: async (): Promise<MaterialCategory[]> => {
     try {
-      const { data, error } = await supabase.from("material_categories").select("*")
-        .order("display_order", { ascending: true, nullsFirst: true })
-        .order("created_at");
-      if (!error && data && data.length > 0) return data as MaterialCategory[];
-    } catch {}
+      const data = await apiGet<MaterialCategory[]>("/api/db/categories");
+      if (Array.isArray(data) && data.length > 0) return data;
+    } catch (e) {
+      console.warn("getCategories fallback:", e);
+    }
     return fallbackCategories;
   },
   addCategory: async (cat: { name_ar: string; name_en: string; department_id?: string | null; academic_year?: string | null }) => {
-    const payload = { ...cat };
-    let { data, error } = await supabase.from("material_categories").insert(payload).select().single();
-    if (error && error.message?.includes("academic_year")) {
-      delete (payload as any).academic_year;
-      const retry = await supabase.from("material_categories").insert(payload).select().single();
-      data = retry.data;
-      error = retry.error;
-    }
-    if (error) throw error;
-    return data as MaterialCategory;
+    return await apiMutate<MaterialCategory>("/api/db/categories", "POST", cat);
   },
   updateCategory: async (id: string, updates: Partial<Pick<MaterialCategory, "name_ar" | "name_en" | "department_id" | "academic_year">>) => {
-    const payload = { ...updates };
-    let { error } = await supabase.from("material_categories").update(payload).eq("id", id);
-    if (error && error.message?.includes("academic_year")) {
-      delete (payload as any).academic_year;
-      const retry = await supabase.from("material_categories").update(payload).eq("id", id);
-      error = retry.error;
-    }
-    if (error) throw error;
+    await apiMutate(`/api/db/categories/${encodeURIComponent(id)}`, "PATCH", updates);
   },
   deleteCategory: async (id: string) => {
-    const { error } = await supabase.from("material_categories").delete().eq("id", id);
-    if (error) throw error;
+    await apiMutate(`/api/db/categories/${encodeURIComponent(id)}`, "DELETE");
   },
   reorderCategories: async (orderedIds: string[]) => {
-    const updates = orderedIds.map((id, index) =>
-      supabase.from("material_categories").update({ display_order: index } as Record<string, number>).eq("id", id)
-    );
-    const results = await Promise.all(updates);
-    const failed = results.find(r => r.error);
-    if (failed?.error) throw failed.error;
-  },
-
-  // Resilient Course Helpers
-  _applyLocalCourseMutations: (base: Course[]): Course[] => {
-    const added = getLocalJson<Course[]>(STORAGE_KEYS.ADDED_COURSES, []);
-    const updated = getLocalJson<Record<string, Partial<Course>>>(STORAGE_KEYS.UPDATED_COURSES, {});
-    const deleted = new Set(getLocalJson<string[]>(STORAGE_KEYS.DELETED_COURSES, []));
-
-    let list = base.filter(c => !deleted.has(c.id));
-    const existingIds = new Set(list.map(c => c.id));
-    for (const c of added) {
-      if (!deleted.has(c.id) && !existingIds.has(c.id)) {
-        list.push(c);
-      }
-    }
-    return list.map(c => (updated[c.id] ? { ...c, ...updated[c.id] } : c));
-  },
-  _recordLocalCourseAddition: (course: Course) => {
-    const added = getLocalJson<Course[]>(STORAGE_KEYS.ADDED_COURSES, []);
-    setLocalJson(STORAGE_KEYS.ADDED_COURSES, [...added.filter(c => c.id !== course.id), course]);
-  },
-  _recordLocalCourseUpdate: (id: string, updates: Partial<Course>) => {
-    const updated = getLocalJson<Record<string, Partial<Course>>>(STORAGE_KEYS.UPDATED_COURSES, {});
-    updated[id] = { ...(updated[id] || {}), ...updates };
-    setLocalJson(STORAGE_KEYS.UPDATED_COURSES, updated);
-  },
-  _recordLocalCourseDelete: (id: string) => {
-    const deleted = getLocalJson<string[]>(STORAGE_KEYS.DELETED_COURSES, []);
-    if (!deleted.includes(id)) {
-      setLocalJson(STORAGE_KEYS.DELETED_COURSES, [...deleted, id]);
-    }
+    await apiMutate("/api/db/categories/reorder", "POST", { orderedIds });
   },
 
   // Courses
   getCourses: async (): Promise<Course[]> => {
-    let base: Course[] = fallbackCourses;
     try {
-      const { data, error } = await supabase.from("courses").select("*").order("created_at");
-      if (!error && data && data.length > 0) {
-        const dbCourseIds = new Set(data.map(c => c.id));
-        const missingFromDb = fallbackCourses.filter(c => !dbCourseIds.has(c.id));
-        base = [...data, ...missingFromDb] as Course[];
-      }
-    } catch {}
-    return db._applyLocalCourseMutations(base);
+      const data = await apiGet<Course[]>("/api/db/courses");
+      if (Array.isArray(data) && data.length > 0) return data;
+    } catch (e) {
+      console.warn("getCourses fallback:", e);
+    }
+    return fallbackCourses;
   },
   getCoursesByDepartment: async (departmentId: string): Promise<Course[]> => {
-    const all = await db.getCourses();
-    const targetId = departmentId === "cs-dept-id" ? "9eaab1c7-37e2-44a4-afbe-738586d50835" : (departmentId === "ai-cyber-dept-id" ? "ca4069a4-fc50-4e96-8fb7-c1f4ea67da4f" : departmentId);
-    return all.filter(c => !targetId || c.department_id === targetId);
+    const targetId = normalizeDeptId(departmentId);
+    try {
+      const data = await apiGet<Course[]>(`/api/db/courses?department_id=${encodeURIComponent(targetId)}`);
+      if (Array.isArray(data)) return data;
+    } catch (e) {
+      console.warn("getCoursesByDepartment fallback:", e);
+    }
+    return fallbackCourses.filter((c) => !targetId || c.department_id === targetId);
   },
-  addCourse: async (course: { name: string; code: string; description: string; description_ar?: string; department_id?: string | null; academic_year: string; semester: string; notes?: string | null }) => {
+  addCourse: async (course: {
+    name: string;
+    code: string;
+    description: string;
+    description_ar?: string;
+    department_id?: string | null;
+    academic_year: string;
+    semester: string;
+    notes?: string | null;
+  }) => {
     const color = COURSE_COLORS[Math.floor(Math.random() * COURSE_COLORS.length)];
-    const payload: any = { ...course, color };
-    let createdCourse: Course | null = null;
-    try {
-      let { data, error } = await supabase.from("courses").insert(payload).select().single();
-      if (error && error.message?.includes("notes")) {
-        delete payload.notes;
-        const retry = await supabase.from("courses").insert(payload).select().single();
-        data = retry.data;
-        error = retry.error;
-      }
-      if (!error && data) {
-        createdCourse = data as Course;
-      }
-    } catch (e) {
-      console.warn("Supabase addCourse error, persisting locally", e);
-    }
-    const finalCourse: Course = createdCourse || {
-      id: crypto.randomUUID ? crypto.randomUUID() : `crs-${Date.now()}`,
-      created_at: new Date().toISOString(),
-      ...payload,
-    };
-    db._recordLocalCourseAddition(finalCourse);
-    return finalCourse;
+    return await apiMutate<Course>("/api/db/courses", "POST", { ...course, color });
   },
-  updateCourse: async (id: string, updates: Partial<Pick<Course, "name" | "code" | "description" | "description_ar" | "department_id" | "academic_year" | "semester" | "notes">>) => {
-    try {
-      const payload: any = { ...updates };
-      let { error } = await supabase.from("courses").update(payload).eq("id", id);
-      if (error && error.message?.includes("notes")) {
-        delete payload.notes;
-        await supabase.from("courses").update(payload).eq("id", id);
-      }
-    } catch (e) {
-      console.warn("Supabase updateCourse error, persisting locally", e);
-    }
-    db._recordLocalCourseUpdate(id, updates);
+  updateCourse: async (
+    id: string,
+    updates: Partial<Pick<Course, "name" | "code" | "description" | "description_ar" | "department_id" | "academic_year" | "semester" | "notes">>
+  ) => {
+    await apiMutate(`/api/db/courses/${encodeURIComponent(id)}`, "PATCH", updates);
   },
   deleteCourse: async (id: string) => {
-    try {
-      await supabase.from("courses").delete().eq("id", id);
-    } catch (e) {
-      console.warn("Supabase deleteCourse error, persisting locally", e);
-    }
-    db._recordLocalCourseDelete(id);
-  },
-
-  // Resilient Material Helpers
-  _applyLocalMaterialMutations: (base: Material[], courseId?: string): Material[] => {
-    const added = getLocalJson<Material[]>(STORAGE_KEYS.ADDED_MATERIALS, []);
-    const updated = getLocalJson<Record<string, Partial<Material>>>(STORAGE_KEYS.UPDATED_MATERIALS, {});
-    const deleted = new Set(getLocalJson<string[]>(STORAGE_KEYS.DELETED_MATERIALS, []));
-    const archived = getLocalJson<Record<string, boolean>>(STORAGE_KEYS.ARCHIVED_MATERIALS, {});
-
-    let list = base.filter(m => !deleted.has(m.id));
-    const existingIds = new Set(list.map(m => m.id));
-    for (const addMat of added) {
-      if (!deleted.has(addMat.id) && !existingIds.has(addMat.id)) {
-        if (!courseId || addMat.course_id === courseId) {
-          list.unshift(addMat);
-        }
-      }
-    }
-    return list.map(m => {
-      let current = { ...m };
-      if (updated[m.id]) {
-        current = { ...current, ...updated[m.id] };
-      }
-      if (archived[m.id] !== undefined) {
-        current.archived = archived[m.id];
-      }
-      return current;
-    });
-  },
-  _recordLocalMaterialAddition: (material: Material) => {
-    const added = getLocalJson<Material[]>(STORAGE_KEYS.ADDED_MATERIALS, []);
-    setLocalJson(STORAGE_KEYS.ADDED_MATERIALS, [material, ...added.filter(m => m.id !== material.id)]);
-  },
-  _recordLocalMaterialUpdate: (id: string, updates: Partial<Material>) => {
-    const updated = getLocalJson<Record<string, Partial<Material>>>(STORAGE_KEYS.UPDATED_MATERIALS, {});
-    updated[id] = { ...(updated[id] || {}), ...updates };
-    setLocalJson(STORAGE_KEYS.UPDATED_MATERIALS, updated);
-  },
-  _recordLocalMaterialDelete: (id: string) => {
-    const deleted = getLocalJson<string[]>(STORAGE_KEYS.DELETED_MATERIALS, []);
-    if (!deleted.includes(id)) {
-      setLocalJson(STORAGE_KEYS.DELETED_MATERIALS, [...deleted, id]);
-    }
-  },
-  _recordLocalMaterialArchive: (id: string, isArchived: boolean) => {
-    const archived = getLocalJson<Record<string, boolean>>(STORAGE_KEYS.ARCHIVED_MATERIALS, {});
-    archived[id] = isArchived;
-    setLocalJson(STORAGE_KEYS.ARCHIVED_MATERIALS, archived);
+    await apiMutate(`/api/db/courses/${encodeURIComponent(id)}`, "DELETE");
   },
 
   // Materials
   getMaterials: async (courseId?: string): Promise<Material[]> => {
-    let base: Material[] = [];
-    const isUuid = !courseId || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(courseId);
-    if (isUuid) {
-      try {
-        let query = supabase.from("materials").select("*")
-          .is("deleted_at", null)
-          .order("sort_order", { ascending: true, nullsFirst: true })
-          .order("created_at", { ascending: false });
-        if (courseId) query = query.eq("course_id", courseId);
-        const { data, error } = await query;
-        if (!error && data && data.length > 0) {
-          const fallbackTarget = courseId ? fallbackMaterials.filter(m => m.course_id === courseId) : fallbackMaterials;
-          if (data.length < fallbackTarget.length) {
-            const dbMatIds = new Set(data.map((m: any) => m.id));
-            const missing = fallbackTarget.filter(m => !dbMatIds.has(m.id));
-            base = [...data, ...missing] as Material[];
-          } else {
-            base = data as Material[];
-          }
-        }
-      } catch {}
+    try {
+      const qs = courseId ? `?course_id=${encodeURIComponent(courseId)}` : "";
+      const data = await apiGet<Material[]>(`/api/db/materials${qs}`);
+      if (Array.isArray(data)) return data;
+    } catch (e) {
+      console.warn("getMaterials fallback:", e);
     }
-    if (base.length === 0) {
-      base = courseId ? fallbackMaterials.filter(m => m.course_id === courseId) : fallbackMaterials;
-    }
-    return db._applyLocalMaterialMutations(base, courseId);
+    return courseId ? fallbackMaterials.filter((m) => m.course_id === courseId) : fallbackMaterials;
   },
   getMaterialsByDepartment: async (departmentId: string): Promise<Material[]> => {
-    const courses = await db.getCoursesByDepartment(departmentId);
-    if (courses.length === 0) return [];
-    const courseIds = courses.map(c => c.id);
-    let base: Material[] = [];
+    const targetId = normalizeDeptId(departmentId);
     try {
-      const { data, error } = await supabase.from("materials").select("*")
-        .in("course_id", courseIds)
-        .is("deleted_at", null)
-        .order("sort_order", { ascending: true, nullsFirst: true })
-        .order("created_at", { ascending: false });
-      if (!error && data && data.length > 0) base = data as Material[];
-    } catch {}
-    if (base.length === 0) {
-      const cSet = new Set(courseIds);
-      base = fallbackMaterials.filter(m => cSet.has(m.course_id));
+      const data = await apiGet<Material[]>(`/api/db/materials?department_id=${encodeURIComponent(targetId)}`);
+      if (Array.isArray(data)) return data;
+    } catch (e) {
+      console.warn("getMaterialsByDepartment fallback:", e);
     }
-    const cSet = new Set(courseIds);
-    return db._applyLocalMaterialMutations(base).filter(m => cSet.has(m.course_id));
+    const deptCourseIds = new Set(
+      fallbackCourses.filter((c) => c.department_id === targetId).map((c) => c.id)
+    );
+    return fallbackMaterials.filter((m) => deptCourseIds.has(m.course_id));
   },
   getMaterialUrlsForCourses: async (courseIds: string[]): Promise<string[]> => {
     if (courseIds.length === 0) return [];
     try {
-      const { data, error } = await supabase.from("materials")
-        .select("pdf_url")
-        .in("course_id", courseIds)
-        .is("deleted_at", null)
-        .eq("archived", false);
-      if (!error && data && data.length > 0) {
-        return data.map(m => m.pdf_url).filter(Boolean) as string[];
-      }
+      const data = await apiGet<string[]>(
+        `/api/db/material-urls?course_ids=${encodeURIComponent(courseIds.join(","))}`
+      );
+      if (Array.isArray(data)) return data;
     } catch {}
     const cSet = new Set(courseIds);
-    return fallbackMaterials.filter(m => cSet.has(m.course_id)).map(m => m.pdf_url).filter(Boolean) as string[];
+    return fallbackMaterials
+      .filter((m) => cSet.has(m.course_id) && !m.archived)
+      .map((m) => m.pdf_url)
+      .filter(Boolean) as string[];
   },
   addMaterial: async (material: {
     title: string;
@@ -621,292 +457,218 @@ export const db = {
     is_reference?: boolean | null;
     section_number?: string | null;
     notes?: string | null;
+    video_url?: string | null;
   }) => {
-    const payload: any = {
-      ...material,
-      archived: false,
-      is_assignment: material.is_assignment || false,
-      is_list: material.is_list || false,
-    };
-    let created: Material | null = null;
-    try {
-      let { data, error } = await supabase.from("materials").insert(payload).select().single();
-      if (error && (error.message?.includes("section_number") || error.message?.includes("notes"))) {
-        const retryPayload = { ...payload };
-        if (error.message?.includes("section_number")) delete retryPayload.section_number;
-        if (error.message?.includes("notes")) delete retryPayload.notes;
-        const retry = await supabase.from("materials").insert(retryPayload).select().single();
-        data = retry.data;
-        error = retry.error;
-      }
-      if (!error && data) {
-        created = data as Material;
-      }
-    } catch (e) {
-      console.warn("Supabase addMaterial error, persisting locally", e);
-    }
-    const finalMat: Material = created || {
-      id: crypto.randomUUID ? crypto.randomUUID() : `mat-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-      created_at: new Date().toISOString(),
-      ...payload,
-    };
-    db._recordLocalMaterialAddition(finalMat);
-    return finalMat;
+    return await apiMutate<Material>("/api/db/materials", "POST", material);
   },
-  updateMaterial: async (id: string, updates: {
-    title?: string;
-    course_id?: string;
-    category_id?: string | null;
-    pdf_url?: string | null;
-    pdf_display_name?: string | null;
-    external_link?: string | null;
-    submission_link?: string | null;
-    deadline?: string | null;
-    is_assignment?: boolean;
-    is_list?: boolean;
-    is_reference?: boolean;
-    list_content?: string | null;
-    section_number?: string | null;
-    notes?: string | null;
-  }) => {
-    try {
-      const payload: any = { ...updates };
-      let { error } = await supabase.from("materials").update(payload).eq("id", id);
-      if (error && (error.message?.includes("section_number") || error.message?.includes("notes"))) {
-        if (error.message?.includes("section_number")) delete payload.section_number;
-        if (error.message?.includes("notes")) delete payload.notes;
-        await supabase.from("materials").update(payload).eq("id", id);
-      }
-    } catch (e) {
-      console.warn("Supabase updateMaterial error, persisting locally", e);
+  updateMaterial: async (
+    id: string,
+    updates: {
+      title?: string;
+      course_id?: string;
+      category_id?: string | null;
+      pdf_url?: string | null;
+      pdf_display_name?: string | null;
+      external_link?: string | null;
+      submission_link?: string | null;
+      deadline?: string | null;
+      is_assignment?: boolean;
+      is_list?: boolean;
+      is_reference?: boolean;
+      list_content?: string | null;
+      section_number?: string | null;
+      notes?: string | null;
+      video_url?: string | null;
     }
-    db._recordLocalMaterialUpdate(id, updates);
+  ) => {
+    await apiMutate(`/api/db/materials/${encodeURIComponent(id)}`, "PATCH", updates);
   },
   archiveMaterial: async (id: string) => {
-    try {
-      await supabase.from("materials").update({ archived: true }).eq("id", id);
-    } catch (e) {
-      console.warn("Supabase archiveMaterial error, persisting locally", e);
-    }
-    db._recordLocalMaterialArchive(id, true);
+    await apiMutate(`/api/db/materials/${encodeURIComponent(id)}`, "PATCH", { archived: true });
   },
   unarchiveMaterial: async (id: string) => {
-    try {
-      await supabase.from("materials").update({ archived: false }).eq("id", id);
-    } catch (e) {
-      console.warn("Supabase unarchiveMaterial error, persisting locally", e);
-    }
-    db._recordLocalMaterialArchive(id, false);
+    await apiMutate(`/api/db/materials/${encodeURIComponent(id)}`, "PATCH", { archived: false });
   },
   deleteMaterial: async (id: string) => {
-    try {
-      await supabase.from("materials").update({ deleted_at: new Date().toISOString() }).eq("id", id);
-    } catch (e) {
-      console.warn("Supabase deleteMaterial error, persisting locally", e);
-    }
-    db._recordLocalMaterialDelete(id);
+    await apiMutate(`/api/db/materials/${encodeURIComponent(id)}`, "DELETE");
   },
-  /** Restore a soft-deleted material by clearing deleted_at */
   restoreMaterial: async (id: string) => {
-    try {
-      await supabase.from("materials").update({ deleted_at: null, archived: false }).eq("id", id);
-    } catch (e) {
-      console.warn("Supabase restoreMaterial error, persisting locally", e);
-    }
-    const deleted = getLocalJson<string[]>(STORAGE_KEYS.DELETED_MATERIALS, []);
-    setLocalJson(STORAGE_KEYS.DELETED_MATERIALS, deleted.filter(d => d !== id));
-    db._recordLocalMaterialArchive(id, false);
+    await apiMutate(`/api/db/materials/${encodeURIComponent(id)}/restore`, "POST");
   },
-  /** Get a single material by ID (including soft-deleted) */
   getMaterialById: async (id: string): Promise<Material | null> => {
-    const { data } = await supabase.from("materials").select("*").eq("id", id).single();
-    return (data as Material) || null;
+    try {
+      return await apiGet<Material | null>(`/api/db/materials/${encodeURIComponent(id)}`);
+    } catch {
+      return fallbackMaterials.find((m) => m.id === id) || null;
+    }
   },
-  /** Batch-update sort_order for a list of material IDs (index = order). */
   reorderMaterials: async (orderedIds: string[]) => {
-    // Update each material's sort_order to its index position
-    const updates = orderedIds.map((id, index) =>
-      supabase.from("materials").update({ sort_order: index }).eq("id", id)
-    );
-    const results = await Promise.all(updates);
-    const failed = results.find(r => r.error);
-    if (failed?.error) throw failed.error;
+    await apiMutate("/api/db/materials/reorder", "POST", { orderedIds });
   },
 
   // Links
   getLinks: async (departmentId?: string | null): Promise<ImportantLink[]> => {
-    const { data } = await supabase.from("important_links").select("*").order("created_at");
-    const all = (data || []) as ImportantLink[];
-    if (!departmentId) return all; // Show all for owner or no filter
-    // Show global links (null dept) + department-specific links
-    return all.filter(l => !l.department_id || l.department_id === departmentId);
+    try {
+      const qs = departmentId ? `?department_id=${encodeURIComponent(departmentId)}` : "";
+      const data = await apiGet<ImportantLink[]>(`/api/db/links${qs}`);
+      if (Array.isArray(data)) return data;
+    } catch {}
+    return [];
   },
   addLink: async (link: { title: string; title_ar?: string | null; url: string; department_id?: string | null }) => {
-    const { data, error } = await supabase.from("important_links").insert(link).select().single();
-    if (error) throw error;
-    return data as ImportantLink;
+    return await apiMutate<ImportantLink>("/api/db/links", "POST", link);
   },
   removeLink: async (id: string) => {
-    const { error } = await supabase.from("important_links").delete().eq("id", id);
-    if (error) throw error;
+    await apiMutate(`/api/db/links/${encodeURIComponent(id)}`, "DELETE");
   },
 
   // Moderators
   getModerators: async (): Promise<Moderator[]> => {
-    const { data } = await supabase.from("moderators").select("*").order("created_at");
-    return (data || []).map(m => ({ ...m, permissions: m.permissions as Permission[] })) as Moderator[];
-  },
-  addModerator: async (mod: { username: string; password: string; display_name: string; permissions: Permission[]; department_id?: string | null; academic_year: string }) => {
-    const { data, error } = await supabase.functions.invoke('create-moderator-auth', {
-      body: mod,
-    });
-    if (error) throw error;
-    if (data?.error) throw new Error(data.error);
-
-    // Guaranteed safeguard: ensure academic_year and department_id are saved in DB
-    // in case the cloud Edge Function was deployed prior to adding academic_year support
-    if (data?.moderator?.id) {
-      await supabase.from("moderators").update({
-        academic_year: mod.academic_year || '1',
-        department_id: mod.department_id || null,
-      }).eq("id", data.moderator.id);
-      data.moderator.academic_year = mod.academic_year || '1';
-      data.moderator.department_id = mod.department_id || null;
+    try {
+      return await apiGet<Moderator[]>("/api/db/moderators");
+    } catch {
+      return [];
     }
-
-    return data.moderator as Moderator;
+  },
+  addModerator: async (mod: {
+    username: string;
+    password: string;
+    display_name: string;
+    permissions: Permission[];
+    department_id?: string | null;
+    academic_year: string;
+  }) => {
+    return await apiMutate<Moderator>("/api/db/moderators", "POST", mod);
   },
   deleteModerator: async (id: string) => {
-    const { error } = await supabase.from("moderators").delete().eq("id", id);
-    if (error) throw error;
+    await apiMutate(`/api/db/moderators/${encodeURIComponent(id)}`, "DELETE");
   },
-  updateModerator: async (id: string, updates: { permissions?: Permission[]; department_id?: string | null; academic_year?: string }) => {
-    const { error } = await supabase.from("moderators").update(updates).eq("id", id);
-    if (error) throw error;
+  updateModerator: async (
+    id: string,
+    updates: { permissions?: Permission[]; department_id?: string | null; academic_year?: string }
+  ) => {
+    await apiMutate(`/api/db/moderators/${encodeURIComponent(id)}`, "PATCH", updates);
   },
   updateModeratorPassword: async (id: string, newPassword: string) => {
-    // The DB trigger hash_moderator_password will auto-hash the plain password
-    const { error } = await supabase.from("moderators").update({ password: newPassword }).eq("id", id);
-    if (error) throw error;
+    await apiMutate(`/api/db/moderators/${encodeURIComponent(id)}/password`, "POST", { password: newPassword });
   },
   setModeratorCourseAccess: async (moderatorId: string, courseIds: string[]) => {
-    // Delete all existing access
-    await supabase.from("moderator_course_access").delete().eq("moderator_id", moderatorId);
-    // Insert new access
-    if (courseIds.length > 0) {
-      const rows = courseIds.map(cid => ({ moderator_id: moderatorId, course_id: cid }));
-      const { error } = await supabase.from("moderator_course_access").insert(rows);
-      if (error) throw error;
-    }
+    await apiMutate(`/api/db/moderator-course-access/${encodeURIComponent(moderatorId)}`, "PUT", { courseIds });
   },
 
-  // Moderator Course Access (cross-department)
+  // Moderator Course Access
   getModeratorCourseAccess: async (moderatorId: string): Promise<ModeratorCourseAccess[]> => {
-    const { data } = await supabase.from("moderator_course_access").select("*").eq("moderator_id", moderatorId);
-    return (data || []) as ModeratorCourseAccess[];
+    try {
+      return await apiGet<ModeratorCourseAccess[]>(
+        `/api/db/moderator-course-access?moderator_id=${encodeURIComponent(moderatorId)}`
+      );
+    } catch {
+      return [];
+    }
   },
   getAllModeratorCourseAccess: async (): Promise<ModeratorCourseAccess[]> => {
-    const { data } = await supabase.from("moderator_course_access").select("*");
-    return (data || []) as ModeratorCourseAccess[];
+    try {
+      return await apiGet<ModeratorCourseAccess[]>("/api/db/moderator-course-access");
+    } catch {
+      return [];
+    }
   },
   addModeratorCourseAccess: async (moderatorId: string, courseId: string) => {
-    const { error } = await supabase.from("moderator_course_access").insert({ moderator_id: moderatorId, course_id: courseId });
-    if (error) throw error;
+    await apiMutate("/api/db/moderator-course-access", "POST", { moderator_id: moderatorId, course_id: courseId });
   },
   removeModeratorCourseAccess: async (id: string) => {
-    const { error } = await supabase.from("moderator_course_access").delete().eq("id", id);
-    if (error) throw error;
+    await apiMutate(`/api/db/moderator-course-access/${encodeURIComponent(id)}`, "DELETE");
   },
 
-  // Shared Department Courses (cross-department visibility for students)
+  // Shared Department Courses
   getSharedCoursesForDept: async (targetDeptId: string): Promise<string[]> => {
-    const { data } = await supabase.from("shared_department_courses").select("course_id").eq("target_department_id", targetDeptId);
-    return (data || []).map((r: any) => r.course_id);
+    try {
+      const rows = await apiGet<{ course_id: string }[]>(
+        `/api/db/shared-courses?target_department_id=${encodeURIComponent(targetDeptId)}`
+      );
+      return rows.map((r) => r.course_id);
+    } catch {
+      return [];
+    }
   },
   getTargetDepartmentsForCourse: async (courseId: string): Promise<string[]> => {
-    const { data } = await supabase.from("shared_department_courses").select("target_department_id").eq("course_id", courseId);
-    return (data || []).map((r: any) => r.target_department_id);
+    try {
+      const rows = await apiGet<{ target_department_id: string }[]>(
+        `/api/db/shared-courses?course_id=${encodeURIComponent(courseId)}`
+      );
+      return rows.map((r) => r.target_department_id);
+    } catch {
+      return [];
+    }
   },
   getAllSharedDeptCourses: async (): Promise<{ id: string; course_id: string; target_department_id: string }[]> => {
-    const { data } = await supabase.from("shared_department_courses").select("*");
-    return (data || []) as any[];
+    try {
+      return await apiGet(`/api/db/shared-courses`);
+    } catch {
+      return [];
+    }
   },
   setSharedCoursesForDept: async (targetDeptId: string, courseIds: string[]) => {
-    // Remove existing
-    await supabase.from("shared_department_courses").delete().eq("target_department_id", targetDeptId);
-    // Insert new
-    if (courseIds.length > 0) {
-      const rows = courseIds.map(cid => ({ course_id: cid, target_department_id: targetDeptId }));
-      const { error } = await supabase.from("shared_department_courses").insert(rows);
-      if (error) throw error;
-    }
+    await apiMutate(`/api/db/shared-courses/by-dept/${encodeURIComponent(targetDeptId)}`, "PUT", { courseIds });
   },
   setTargetDepartmentsForCourse: async (courseId: string, targetDeptIds: string[]) => {
-    await supabase.from("shared_department_courses").delete().eq("course_id", courseId);
-    if (targetDeptIds.length > 0) {
-      const rows = targetDeptIds.map(tid => ({ course_id: courseId, target_department_id: tid }));
-      const { error } = await supabase.from("shared_department_courses").insert(rows);
-      if (error) throw error;
-    }
+    await apiMutate(`/api/db/shared-courses/by-course/${encodeURIComponent(courseId)}`, "PUT", { targetDeptIds });
   },
 
   // Notifications
   getNotifications: async (): Promise<Notification[]> => {
-    const { data } = await supabase.from("notifications").select("*").order("created_at", { ascending: false });
-    return (data || []) as Notification[];
+    try {
+      return await apiGet<Notification[]>("/api/db/notifications");
+    } catch {
+      return [];
+    }
   },
-  addNotification: async (notif: { title: string; message: string; target_audience: string; target_year?: string | null; link?: string | null; sent_by?: string }) => {
-    // Ensure we have a fresh session before insert (RLS requires authenticated user)
-    const { data: sessionData } = await supabase.auth.refreshSession().catch(() => ({ data: null }));
-    const session = sessionData?.session ?? (await supabase.auth.getSession()).data.session;
-
-    const { data, error } = await supabase.from("notifications").insert(notif).select().single();
-    if (error) throw error;
-    
-    // Trigger push via Supabase Edge Function
-    const headers: Record<string, string> = {};
-    if (session?.access_token) {
-      headers['Authorization'] = `Bearer ${session.access_token}`;
-    }
-    const { error: pushError } = await supabase.functions.invoke('send-push', {
-      body: { title: notif.title, message: notif.message, target_audience: notif.target_audience, target_year: notif.target_year, link: notif.link },
-      headers,
-    });
-    
-    if (pushError) {
-      console.warn("Push notification send failed:", pushError);
-      throw new Error("تم حفظ الإشعار في السجل، ولكن فشل إرساله كإشعار منبثق للأجهزة. " + (pushError.message || ""));
-    }
-    
-    return data as Notification;
+  addNotification: async (notif: {
+    title: string;
+    message: string;
+    target_audience: string;
+    target_year?: string | null;
+    link?: string | null;
+    sent_by?: string;
+  }) => {
+    return await apiMutate<Notification>("/api/db/notifications", "POST", notif);
   },
 
   // Notification Templates
   getNotificationTemplates: async (): Promise<NotificationTemplate[]> => {
-    const { data } = await supabase.from("notification_templates").select("*");
-    return (data || []) as NotificationTemplate[];
+    try {
+      return await apiGet<NotificationTemplate[]>("/api/db/notification-templates");
+    } catch {
+      return [];
+    }
   },
   updateNotificationTemplate: async (id: string, title_template: string, message_template: string) => {
-    const { error } = await supabase.from("notification_templates").update({ 
-      title_template, 
+    await apiMutate(`/api/db/notification-templates/${encodeURIComponent(id)}`, "PATCH", {
+      title_template,
       message_template,
-      updated_at: new Date().toISOString()
-    }).eq("id", id);
-    if (error) throw error;
+    });
   },
 
   // Announcements
   getAnnouncements: async (): Promise<Announcement[]> => {
-    const { data } = await supabase.from("announcements").select("*").gt("expires_at", new Date().toISOString());
-    return (data || []) as Announcement[];
+    try {
+      return await apiGet<Announcement[]>("/api/db/announcements");
+    } catch {
+      return [];
+    }
   },
-  addAnnouncement: async (announcement: { content: string; expires_at: string; link?: string | null; target_year?: string | null; target_dept?: string | null; color?: string | null }) => {
-    const { error } = await supabase.from("announcements").insert(announcement);
-    if (error) throw error;
+  addAnnouncement: async (announcement: {
+    content: string;
+    expires_at: string;
+    link?: string | null;
+    target_year?: string | null;
+    target_dept?: string | null;
+    color?: string | null;
+  }) => {
+    await apiMutate("/api/db/announcements", "POST", announcement);
   },
   deleteAnnouncement: async (id: string) => {
-    const { error } = await supabase.from("announcements").delete().eq("id", id);
-    if (error) throw error;
+    await apiMutate(`/api/db/announcements/${encodeURIComponent(id)}`, "DELETE");
   },
 
   // Audit Logs
@@ -919,88 +681,60 @@ export const db = {
       material_snapshot?: Record<string, any>;
     }
   ) => {
-    const user = auth.getCurrentUser();
-    if (!user || !user.role) return;
-    
+    if (!auth.isLoggedIn()) return;
     try {
-      await supabase.from("audit_logs").insert({
-        admin_id: user.role === "owner" ? "00000000-0000-0000-0000-000000000000" : user.moderatorId,
-        admin_name: user.role === "owner" ? "المالك" : (user.displayName || "Unknown"),
+      await apiMutate("/api/db/audit-logs", "POST", {
         action,
         details,
         action_type: options?.action_type || "other",
         related_material_id: options?.related_material_id || null,
         material_snapshot: options?.material_snapshot || null,
-        admin_year: user.role === "owner" ? "1" : (user.academicYear || "1"),
       });
     } catch (e) {
-      console.error("Audit log failed", e);
+      console.warn("Audit log failed:", e);
     }
   },
 
   getAuditLogs: async (limit = 200): Promise<any[]> => {
-    const { data } = await supabase
-      .from("audit_logs" as any)
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(limit);
-    return (data || []) as any[];
+    try {
+      return await apiGet<any[]>(`/api/db/audit-logs?limit=${limit}`);
+    } catch {
+      return [];
+    }
   },
 
-  // Storage
-  /**
-   * Sanitize a filename to be safe for Supabase storage URLs.
-   * Strips Arabic characters, special symbols, and spaces — keeps only
-   * alphanumeric chars, hyphens, underscores and dots.
-   */
+  // Storage (Direct Cloudflare R2 uploads via Worker)
   sanitizeFileName: (name: string): string => {
-    // Remove extension, sanitize, then re-attach
-    const ext = name.lastIndexOf('.') >= 0 ? name.slice(name.lastIndexOf('.')) : '';
-    const base = name.lastIndexOf('.') >= 0 ? name.slice(0, name.lastIndexOf('.')) : name;
-    // Replace anything that isn't a-z, A-Z, 0-9, hyphen or underscore
-    const clean = base.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 60) || 'file';
+    const ext = name.lastIndexOf(".") >= 0 ? name.slice(name.lastIndexOf(".")) : "";
+    const base = name.lastIndexOf(".") >= 0 ? name.slice(0, name.lastIndexOf(".")) : name;
+    const clean = base.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 60) || "file";
     return `${Date.now()}-${clean}${ext}`;
   },
 
-  /** Allowed file MIME types for upload */
   ALLOWED_UPLOAD_TYPES: [
-    'application/pdf',
-    'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime',
-    'audio/mpeg', 'audio/wav', 'audio/aac', 'audio/x-m4a', 'audio/m4a', 'audio/ogg'
+    "application/pdf",
+    "video/mp4", "video/webm", "video/ogg", "video/quicktime",
+    "audio/mpeg", "audio/wav", "audio/aac", "audio/x-m4a", "audio/m4a", "audio/ogg",
+    "image/png", "image/jpeg", "image/webp", "image/gif",
   ] as const,
 
-  uploadPdf: async (file: File): Promise<string> => {
-    // Validate file type
+  uploadPdf: async (file: File, onProgress?: (percent: number) => void): Promise<string> => {
     const allowedTypes: readonly string[] = db.ALLOWED_UPLOAD_TYPES;
     const allowedExtensions = [
-      '.pdf', '.mp3', '.wav', '.m4a', '.aac', '.ogg',
-      '.png', '.jpg', '.jpeg', '.docx', '.doc', '.pptx', '.xlsx',
-      '.mp4', '.webm', '.mkv', '.avi'
+      ".pdf", ".mp3", ".wav", ".m4a", ".aac", ".ogg",
+      ".png", ".jpg", ".jpeg", ".webp", ".gif",
+      ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls",
+      ".mp4", ".webm", ".mkv", ".avi", ".mov", ".txt", ".zip", ".rar",
     ];
-    const hasAllowedExtension = allowedExtensions.some(ext => file.name.toLowerCase().endsWith(ext));
+    const hasAllowedExtension = allowedExtensions.some((ext) => file.name.toLowerCase().endsWith(ext));
     if (!allowedTypes.includes(file.type as any) && !hasAllowedExtension) {
-      throw new Error('نوع الملف غير مسموح به. يُسمح بملفات PDF، الفيديو، المستندات، والصوتيات.');
+      throw new Error("نوع الملف غير مسموح به. يُسمح بملفات PDF، الفيديو، المستندات، الصور، والصوتيات.");
     }
-    try {
-      return await db._uploadToSupabase(file);
-    } catch (e) {
-      console.warn("Storage upload failed, fallback to local object URL", e);
-      return URL.createObjectURL(file);
-    }
+    return await uploadFileToR2(file, onProgress);
   },
 
-  /** Upload a file with a sanitized storage path. Returns the public URL. */
-  uploadPdfSanitized: async (file: File): Promise<string> => {
-    return db.uploadPdf(file);
-  },
-
-  /** Internal: upload file to Supabase Storage (for PDFs) */
-  _uploadToSupabase: async (file: File): Promise<string> => {
-    const safeName = db.sanitizeFileName(file.name);
-    const { error } = await supabase.storage.from("materials").upload(safeName, file);
-    if (error) throw error;
-    const { data: urlData } = supabase.storage.from("materials").getPublicUrl(safeName);
-    return urlData.publicUrl;
+  uploadPdfSanitized: async (file: File, onProgress?: (percent: number) => void): Promise<string> => {
+    return db.uploadPdf(file, onProgress);
   },
 };
 
@@ -1018,7 +752,7 @@ export function categoriesForDepartment(
   departmentId?: string | null,
   academicYear?: string | null
 ): MaterialCategory[] {
-  return categories.filter(c => {
+  return categories.filter((c) => {
     const matchesDept = !c.department_id || (departmentId && c.department_id === departmentId);
     const matchesYear = !c.academic_year || (academicYear && c.academic_year === academicYear);
     return matchesDept && matchesYear;

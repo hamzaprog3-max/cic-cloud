@@ -11,6 +11,7 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { useState, useCallback, useEffect, useRef, lazy, Suspense } from "react";
 import { cn } from "@/lib/utils";
 import { useOfflineStorage } from "@/hooks/use-offline-storage";
+import { toR2ViewUrl } from "@/lib/r2";
 const AiLectureExplainerModal = lazy(() => import("@/components/AiLectureExplainerModal"));
 
 import type { Course } from "@/lib/store";
@@ -143,7 +144,8 @@ const PdfViewerModal = ({
       : `document.pdf`;
 
   const sourceKind: SourceKind = objectUrl ? "cache" : "network";
-  const finalPdfUrl = objectUrl || pdfUrl;
+  const resolvedNetworkUrl = pdfUrl ? toR2ViewUrl(pdfUrl) : pdfUrl;
+  const finalPdfUrl = objectUrl || resolvedNetworkUrl;
   const usesPdfJs = !isImg && !useNativeViewer;
   const viewerUrl = usesPdfJs
     ? `/pdfjs-viewer/web/viewer.html?file=${encodeURIComponent(finalPdfUrl)}`

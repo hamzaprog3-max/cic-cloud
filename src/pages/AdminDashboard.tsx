@@ -143,7 +143,13 @@ const AdminDashboard = () => {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      if (!auth.isLoggedIn()) return;
+      if (!user.role) return;
+      if (!auth.isLoggedIn()) {
+        auth.logout();
+        toast.info(lang === "ar" ? "تم تحديث نظام الأمان — يرجى تسجيل الدخول مرة أخرى" : "Security updated — please sign in again");
+        navigate("/login", { replace: true });
+        return;
+      }
       const ok = await auth.hasValidSession();
       if (!ok && !cancelled) {
         auth.logout();
@@ -152,7 +158,7 @@ const AdminDashboard = () => {
       }
     })();
     return () => { cancelled = true; };
-  }, [navigate]);
+  }, [navigate, user.role, lang]);
 
 
   // If moderator has department_id or academic_year, lock filters
@@ -208,6 +214,8 @@ const AdminDashboard = () => {
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [pdfExternalUrl, setPdfExternalUrl] = useState("");
   const [pdfDisplayName, setPdfDisplayName] = useState("");
+  const [videoUrl, setVideoUrl] = useState("");
+  const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [pdfMode, setPdfMode] = useState<"upload" | "url">("upload");
   const [uploading, setUploading] = useState(false);
   const [isList, setIsList] = useState(false);
@@ -290,8 +298,8 @@ const AdminDashboard = () => {
     if (!title || !courseId) { toast.error(t("admin.titleAndCourseReq")); return; }
 
     if (isAssignment && !isAssignmentOpenEnded && !deadline) { toast.error(t("admin.deadlineRequired")); return; }
-    if (pdfMode === "upload" && !pdfFile && !isList && !isReference) { toast.error(lang === "ar" ? "يجب اختيار ملف للرفع" : "You must select a file to upload"); return; }
-    if (pdfMode === "url" && !pdfExternalUrl && !isList && !isReference) { toast.error(lang === "ar" ? "يجب إدخال رابط الملف" : "You must enter the file URL"); return; }
+    if (pdfMode === "upload" && !pdfFile && !videoUrl.trim() && !isList && !isReference) { toast.error(lang === "ar" ? "يجب اختيار ملف أو إدخال رابط تسجيل المحاضرة" : "You must select a file or enter a recording URL"); return; }
+    if (pdfMode === "url" && !pdfExternalUrl && !videoUrl.trim() && !isList && !isReference) { toast.error(lang === "ar" ? "يجب إدخال رابط الملف أو رابط التسجيل" : "You must enter the file or recording URL"); return; }
 
     if (!navigator.onLine) {
       toast.error(lang === "ar" ? "لا يوجد اتصال بالإنترنت! يرجى الاتصال بالإنترنت أولاً." : "No internet connection! Please connect to the internet first.");
@@ -299,10 +307,11 @@ const AdminDashboard = () => {
     }
 
     setUploading(true);
+    setUploadProgress(0);
     try {
       let pdfUrl: string | null = null;
       if (pdfMode === "upload" && pdfFile) {
-        pdfUrl = await db.uploadPdf(pdfFile);
+        pdfUrl = await db.uploadPdf(pdfFile, (pct) => setUploadProgress(pct));
       } else if (pdfMode === "url" && pdfExternalUrl) {
         pdfUrl = pdfExternalUrl;
       }
@@ -314,6 +323,7 @@ const AdminDashboard = () => {
         category_id: categoryId || null,
         pdf_url: pdfUrl,
         pdf_display_name: pdfDisplayName || null,
+        video_url: videoUrl.trim() || null,
         external_link: isPdfOnly ? null : (externalLink || null),
         submission_link: isAssignment ? (submissionLink || null) : null,
         deadline: isAssignmentOpenEnded ? null : (deadline || null),
@@ -327,7 +337,7 @@ const AdminDashboard = () => {
 
       await loadData();
       setTitle(""); setExternalLink(""); setSubmissionLink(""); setDeadline(""); setIsAssignmentOpenEnded(false);
-      setPdfFile(null); setPdfExternalUrl(""); setPdfDisplayName(""); setIsList(false); setListContent(""); setIsReference(false);
+      setPdfFile(null); setPdfExternalUrl(""); setPdfDisplayName(""); setVideoUrl(""); setUploadProgress(0); setIsList(false); setListContent(""); setIsReference(false);
       setSectionNumber("all"); setMaterialNotes("");
       const fileInput = document.getElementById("pdf-upload") as HTMLInputElement;
       if (fileInput) fileInput.value = "";
@@ -916,14 +926,32 @@ const AdminDashboard = () => {
                         </div>
                       ) : pdfMode === "upload" ? (
                         <div className="space-y-1">
-                          <Input id="pdf-upload" type="file" accept=".pdf,video/*,audio/*" onChange={e => setPdfFile(e.target.files?.[0] || null)} className="bg-secondary/50" />
+                          <Input id="pdf-upload" type="file" accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.png,.jpg,.jpeg,.webp,video/*,audio/*" onChange={e => setPdfFile(e.target.files?.[0] || null)} className="bg-secondary/50" />
                           {pdfFile && <p className="text-xs text-primary">{pdfFile.name}</p>}
+                          {uploading && uploadProgress > 0 && (
+                            <div className="w-full bg-secondary rounded-full h-1.5 overflow-hidden mt-1">
+                              <div className="h-full bg-primary transition-all duration-200" style={{ width: `${uploadProgress}%` }} />
+                            </div>
+                          )}
                         </div>
                       ) : (
                         <Input placeholder={t("admin.pdfDirectLink")} value={pdfExternalUrl} onChange={e => setPdfExternalUrl(e.target.value)} className="bg-secondary/50" />
                       )}
                       {!isFolderMode && (
-                        <Input placeholder={t("admin.pdfDisplayName")} value={pdfDisplayName} onChange={e => setPdfDisplayName(e.target.value)} className="bg-secondary/50" />
+                        <>
+                          <Input placeholder={t("admin.pdfDisplayName")} value={pdfDisplayName} onChange={e => setPdfDisplayName(e.target.value)} className="bg-secondary/50" />
+                          <div className="space-y-1 pt-1">
+                            <label className="text-xs font-semibold text-primary flex items-center gap-1.5">
+                              <span>🎥</span> {lang === "ar" ? "رابط تسجيل المحاضرة / فيديو (اختياري):" : "Lecture Recording / Video URL (optional):"}
+                            </label>
+                            <Input
+                              placeholder={lang === "ar" ? "رابط Cloudinary أو Teams أو YouTube أو SharePoint للتسجيل" : "Cloudinary, Teams, YouTube, or SharePoint recording link"}
+                              value={videoUrl}
+                              onChange={e => setVideoUrl(e.target.value)}
+                              className="bg-secondary/50 text-xs"
+                            />
+                          </div>
+                        </>
                       )}
                     </div>
 
