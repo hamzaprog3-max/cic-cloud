@@ -72,10 +72,10 @@ const YearCoursesPage = () => {
 
   const sharedCourses = allCourses.filter(c => sharedCourseIds.includes(c.id));
   
-  // Year 1 is foundational and shared across all departments (CS & Cyber).
-  // Year 2 Semester 1 core courses are also shared across departments.
-  const isCommonYearOrCore = yearId === "1" || (yearId === "2" && semesterId === "1");
-  const rawCourses = isCommonYearOrCore
+  // Year 2 Semester 1 core computing courses are shared across computing departments.
+  // Year 1 is department-specific (Cyber has its own curriculum and does not take Physics).
+  const isCommonCore = yearId === "2" && semesterId === "1";
+  const rawCourses = isCommonCore
     ? allCourses
     : (targetDeptId ? [...deptCourses, ...sharedCourses] : allCourses);
   
