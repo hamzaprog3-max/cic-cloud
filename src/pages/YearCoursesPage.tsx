@@ -177,11 +177,13 @@ const YearCoursesPage = () => {
                       
                       <div className="text-start flex-1 mb-8">
                         <h3 className="font-display font-semibold text-xl mb-3 text-foreground leading-tight">
-                          {tCourse(course.name)}
+                          {course.name}
                         </h3>
-                        <p className="text-sm text-muted-foreground leading-relaxed line-clamp-3">
-                          {lang === "ar" ? (course as any).description_ar || course.description : course.description}
-                        </p>
+                        {course.description && (
+                          <p className="text-sm text-muted-foreground leading-relaxed line-clamp-3">
+                            {course.description}
+                          </p>
+                        )}
                       </div>
 
                       <div className="flex items-center justify-end gap-1.5 text-sm font-medium transition-colors mt-auto opacity-80 group-hover:opacity-100" style={{ color: `hsl(${course.color})` }}>

@@ -170,7 +170,7 @@ const CoursePage = () => {
       a.href = URL.createObjectURL(content);
       const categoryObj = categories.find(c => c.id === activeCategory);
       const catName = categoryObj ? (lang === "ar" ? categoryObj.name_ar : categoryObj.name_en) : "materials";
-      const courseNameStr = course ? tCourse(course.name) : "course";
+      const courseNameStr = course ? course.name : "course";
       a.download = `${catName} (${courseNameStr}).zip`;
       document.body.appendChild(a);
       a.click();
@@ -241,7 +241,7 @@ const CoursePage = () => {
   const handleShareCategory = async () => {
     const categoryObj = categories.find(c => c.id === activeCategory);
     const catName = categoryObj ? (lang === "ar" ? categoryObj.name_ar : categoryObj.name_en) : "";
-    const courseName = course ? tCourse(course.name) : "";
+    const courseName = course ? course.name : "";
     const shareTitle = lang === "ar"
       ? `${catName} — ${courseName}`
       : `Check out the ${catName} materials for ${courseName}`;
@@ -309,7 +309,7 @@ const CoursePage = () => {
           >
             {course.code}
           </div>
-          <h1 className="text-3xl font-display font-bold">{tCourse(course.name)}</h1>
+          <h1 className="text-3xl font-display font-bold">{course.name}</h1>
           <p className="text-muted-foreground mt-1">{course.description}</p>
           
           <div className="mt-4 flex flex-wrap gap-2">

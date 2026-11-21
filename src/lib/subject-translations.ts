@@ -87,9 +87,7 @@ export function translateSubject(input: string, lang: SubjectLang): string {
   return translateBaseSubject(s, lang);
 }
 
-export function translateCourseName(input: string, lang: SubjectLang): string {
-  const s = input.trim();
-  const match = courseIndex[s];
-  if (match) return match[lang];
-  return s;
+export function translateCourseName(input: string, _lang?: SubjectLang): string {
+  // Always respect original admin course titles without auto-translating
+  return input;
 }

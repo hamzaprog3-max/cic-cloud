@@ -150,7 +150,7 @@ const CourseManager = ({
 
   const startEdit = async (c: Course) => { 
     setEditingId(c.id); 
-    setEditName(translateCourseName(c.name, lang)); 
+    setEditName(c.name); 
     setEditCode(c.code); 
     setEditDesc(c.description || ""); 
     setEditNotes(c.notes || "");
@@ -317,7 +317,7 @@ const CourseManager = ({
               )}
             </div>
 
-            <h3 className="font-display font-semibold text-sm text-foreground">{translateCourseName(course.name, lang)}</h3>
+            <h3 className="font-display font-semibold text-sm text-foreground">{course.name}</h3>
             <p className="text-xs text-muted-foreground mt-0.5 font-mono">{course.code}</p>
             {course.description && <p className="text-xs text-muted-foreground/80 mt-1 line-clamp-2">{course.description}</p>}
             {course.notes && (
