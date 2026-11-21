@@ -18,11 +18,11 @@ self.addEventListener("install", () => {
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
-    // Delete old/corrupted material caches, then claim clients
+    // Delete old/corrupted caches (materials v1, api v1, assets v1)
     caches.keys().then((cacheNames) =>
       Promise.all(
         cacheNames
-          .filter((name) => name === 'cic-offline-materials-v1')
+          .filter((name) => name === 'cic-offline-materials-v1' || name === 'cic-api-data-v1' || name === 'cic-assets-v1')
           .map((name) => caches.delete(name))
       )
     ).then(() => self.clients.claim())
@@ -55,7 +55,7 @@ try {
 registerRoute(
   ({ url }) => url.origin === self.location.origin && url.pathname.startsWith('/assets/'),
   new CacheFirst({
-    cacheName: 'cic-assets-v1',
+    cacheName: 'cic-assets-v2',
     plugins: [
       new CacheableResponsePlugin({
         statuses: [0, 200],
@@ -72,7 +72,7 @@ registerRoute(
 registerRoute(
   ({ url }) => url.hostname.includes('supabase.co') && url.pathname.startsWith('/rest/'),
   new NetworkFirst({
-    cacheName: 'cic-api-data-v1',
+    cacheName: 'cic-api-data-v2',
     networkTimeoutSeconds: 4,
     plugins: [
       new CacheableResponsePlugin({
