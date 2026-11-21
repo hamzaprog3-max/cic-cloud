@@ -1,0 +1,499 @@
+/* ==========================================================================
+   APPLE macOS / iCLOUD MAIL DESIGN SYSTEM (https://www.icloud.com/mail/)
+   Strictly scoped under html[data-design="apple"] (and [data-morph-lock="apple"])
+   so Classic CIC Cloud mode remains 100% authentic and interference-free.
+   ========================================================================== */
+
+/* ==========================================================================
+   OFFICIAL APPLE SF ARABIC WEBFONTS (AUTHENTIC macOS TYPOGRAPHY)
+   Directly loaded to guarantee 100% native Mac typography across all platforms.
+   ========================================================================== */
+@font-face {
+  font-family: "SF Pro Arabic";
+  src:
+    local("SF Pro Arabic"),
+    local("SF Arabic"),
+    url("/fonts/SF-Arabic.ttf") format("truetype");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "SF Pro Arabic Rounded";
+  src:
+    local("SF Pro Arabic Rounded"),
+    local("SF Arabic Rounded"),
+    url("/fonts/SF-Arabic-Rounded.ttf") format("truetype");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ── Apple Light Mode Tokens ─────────────────────────────────────────────── */
+html[data-design="apple"],
+[data-morph-lock="apple"] {
+  --background: 240 12% 96%;            /* #f5f5f7 Apple light canvas */
+  --foreground: 240 4% 11%;             /* #1d1d1f Apple primary ink */
+
+  --card: 0 0% 100%;                    /* #ffffff solid elevated surface */
+  --card-foreground: 240 4% 11%;
+
+  --popover: 0 0% 100%;
+  --popover-foreground: 240 4% 11%;
+
+  --primary: 211 100% 45%;              /* #0071e3 Apple System Blue (solid) */
+  --primary-foreground: 0 0% 100%;
+
+  --secondary: 240 8% 93%;              /* #ededf0 macOS control fill */
+  --secondary-foreground: 240 4% 16%;
+
+  --muted: 240 9% 94%;                  /* #efeff2 grouped inset fill */
+  --muted-foreground: 240 3% 44%;       /* #6e6e73 Apple secondary label */
+
+  --accent: 211 100% 95%;
+  --accent-foreground: 211 100% 40%;
+
+  --destructive: 3 100% 59%;            /* #ff3b30 Apple System Red */
+  --destructive-foreground: 0 0% 100%;
+
+  --border: 240 6% 88%;                 /* #dfdfe4 crisp hairline */
+  --input: 240 6% 86%;
+  --ring: 211 100% 45%;
+  --radius: 0.875rem;                   /* 14px macOS corner radius */
+
+  --icloud-canvas: #f5f5f7;
+  --icloud-pane: #ffffff;
+  --icloud-pane-solid: #ffffff;
+  --icloud-topbar-bg: rgba(250, 250, 252, 0.84);
+  --icloud-hairline: rgba(0, 0, 0, 0.08);
+  --icloud-hairline-strong: rgba(0, 0, 0, 0.14);
+  --icloud-row-hover: rgba(0, 0, 0, 0.032);
+  --icloud-row-active: rgba(0, 113, 227, 0.10);
+  --icloud-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04), 0 0 0 0.5px rgba(0, 0, 0, 0.05);
+  --icloud-shadow-md: 0 6px 22px -6px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.04);
+  --icloud-shadow-lg: 0 20px 50px -12px rgba(0, 0, 0, 0.16), 0 2px 8px rgba(0, 0, 0, 0.06);
+  --glass: 0 0% 100% / 0.92;
+  --glow: 211 100% 45%;
+}
+
+/* ── Apple Dark Mode Tokens ──────────────────────────────────────────────── */
+html.dark[data-design="apple"],
+.dark [data-morph-lock="apple"] {
+  --background: 240 3% 11%;             /* #1c1c1e Apple dark canvas */
+  --foreground: 240 12% 96%;            /* #f5f5f7 Apple dark primary ink */
+
+  --card: 240 3% 16%;                   /* #262629 solid elevated card */
+  --card-foreground: 240 12% 96%;
+
+  --popover: 240 3% 18%;                /* #2c2c30 dark macOS popover */
+  --popover-foreground: 240 12% 96%;
+
+  --primary: 210 100% 52%;              /* #0a84ff Apple Dark System Blue */
+  --primary-foreground: 0 0% 100%;
+
+  --secondary: 240 4% 22%;              /* #35353a macOS dark control fill */
+  --secondary-foreground: 240 10% 94%;
+
+  --muted: 240 3% 19%;                  /* #2f2f34 grouped inset fill */
+  --muted-foreground: 240 4% 62%;       /* #98989f Apple secondary dark label */
+
+  --accent: 210 100% 52% / 0.16;
+  --accent-foreground: 210 100% 66%;
+
+  --destructive: 3 100% 61%;            /* #ff453a Apple Dark System Red */
+  --destructive-foreground: 0 0% 100%;
+
+  --border: 240 4% 25%;
+  --input: 240 4% 25%;
+  --ring: 210 100% 52%;
+
+  --icloud-canvas: #1c1c1e;
+  --icloud-pane: #262629;
+  --icloud-pane-solid: #262629;
+  --icloud-topbar-bg: rgba(28, 28, 30, 0.82);
+  --icloud-hairline: rgba(255, 255, 255, 0.09);
+  --icloud-hairline-strong: rgba(255, 255, 255, 0.16);
+  --icloud-row-hover: rgba(255, 255, 255, 0.05);
+  --icloud-row-active: rgba(10, 132, 255, 0.18);
+  --icloud-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35), 0 0 0 0.5px rgba(255, 255, 255, 0.07);
+  --icloud-shadow-md: 0 10px 28px -8px rgba(0, 0, 0, 0.5), 0 0 0 0.5px rgba(255, 255, 255, 0.08);
+  --icloud-shadow-lg: 0 24px 60px -12px rgba(0, 0, 0, 0.68), 0 0 0 0.5px rgba(255, 255, 255, 0.10);
+  --glass: 240 3% 16% / 0.92;
+  --glow: 210 100% 52%;
+}
+
+/* ── Apple Typography & Pure Flat Canvas ─────────────────────────────────── */
+html[data-design="apple"] {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+html[data-design="apple"] body,
+html[data-design="apple"] button:not([data-morph-lock="classic"] button),
+html[data-design="apple"] input:not([data-morph-lock="classic"] input),
+html[data-design="apple"] textarea:not([data-morph-lock="classic"] textarea),
+html[data-design="apple"] select:not([data-morph-lock="classic"] select),
+[data-morph-lock="apple"],
+[data-morph-lock="apple"] button,
+[data-morph-lock="apple"] input {
+  font-family: "SF Pro Arabic", -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", sans-serif !important;
+  letter-spacing: -0.015em;
+}
+
+html[data-design="apple"] body {
+  background-color: var(--icloud-canvas);
+  color: hsl(var(--foreground));
+  overflow-x: hidden;
+}
+
+html[data-design="apple"] h1,
+html[data-design="apple"] h2,
+html[data-design="apple"] h3,
+html[data-design="apple"] h4,
+html[data-design="apple"] h5,
+html[data-design="apple"] h6,
+html[data-design="apple"] .apple-title,
+[data-morph-lock="apple"] h1,
+[data-morph-lock="apple"] h2,
+[data-morph-lock="apple"] h3 {
+  font-family: "SF Pro Arabic", -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", sans-serif !important;
+  letter-spacing: -0.024em;
+  font-weight: 700;
+}
+
+/* Authentic macOS Arrow Cursor for cards & list items (as in iCloud Mail) */
+html[data-design="apple"] .mac-cursor,
+html[data-design="apple"] .glass-card,
+html[data-design="apple"] .icloud-list-row,
+html[data-design="apple"] .icloud-segmented-item {
+  cursor: default !important;
+}
+
+html[data-design="apple"] ::selection {
+  background-color: hsl(var(--primary) / 0.22);
+  color: hsl(var(--foreground));
+}
+
+/* Flat solid canvas in Apple mode — zero glowing color blobs */
+html[data-design="apple"] .ambient-mesh {
+  background: var(--icloud-canvas) !important;
+}
+
+/* Crisp Solid macOS Card Surface (.glass-card) in Apple mode */
+html[data-design="apple"] .glass-card:not([data-morph-lock="classic"]),
+.glass-card[data-morph-lock="apple"],
+[data-morph-lock="apple"] .glass-card {
+  background: var(--icloud-pane) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border: 1px solid var(--icloud-hairline) !important;
+  box-shadow: var(--icloud-shadow-sm);
+  transition:
+    transform 200ms cubic-bezier(0.25, 0.1, 0.25, 1),
+    box-shadow 200ms cubic-bezier(0.25, 0.1, 0.25, 1),
+    border-color 160ms ease,
+    background-color 160ms ease;
+}
+
+html[data-design="apple"] .glass-card:not([data-morph-lock="classic"]):hover {
+  border-color: var(--icloud-hairline-strong) !important;
+}
+
+/* Solid Crisp Brand Title in Apple mode (No Gradient Text) */
+html[data-design="apple"] .text-gradient:not([data-morph-lock="classic"]) {
+  background: none !important;
+  -webkit-background-clip: initial !important;
+  background-clip: initial !important;
+  color: hsl(var(--foreground)) !important;
+  -webkit-text-fill-color: currentColor !important;
+}
+
+/* While an element is morph-locked to Classic mid-flip, preserve Classic typography & gradient */
+html[data-design="apple"] [data-morph-lock="classic"],
+html[data-design="apple"] [data-morph-lock="classic"] * {
+  font-family: 'Cairo', 'Noto Naskh Arabic', sans-serif !important;
+  letter-spacing: normal !important;
+}
+
+html[data-design="apple"] [data-morph-lock="classic"] .text-gradient,
+html[data-design="apple"] .text-gradient[data-morph-lock="classic"] {
+  background: linear-gradient(to right, hsl(190 80% 45%), hsl(170, 70%, 50%)) !important;
+  -webkit-background-clip: text !important;
+  background-clip: text !important;
+  color: transparent !important;
+  -webkit-text-fill-color: transparent !important;
+}
+
+/* ==========================================================================
+   SHARED UI PRIMITIVES (Styled smoothly via tokens in BOTH Apple & Classic)
+   ========================================================================== */
+
+/* macOS / Frosted Top Toolbar */
+.icloud-topbar {
+  background: var(--icloud-topbar-bg);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid var(--icloud-hairline);
+}
+
+/* Elevated Sheet / Dialog Pane */
+.icloud-pane {
+  background: var(--icloud-pane-solid);
+  border: 1px solid var(--icloud-hairline);
+  border-radius: 20px;
+  box-shadow: var(--icloud-shadow-lg);
+}
+
+/* Grouped Inset List */
+.icloud-list-group {
+  background: var(--icloud-pane-solid);
+  border: 1px solid var(--icloud-hairline);
+  border-radius: 16px;
+  box-shadow: var(--icloud-shadow-sm);
+  overflow: hidden;
+}
+
+.icloud-list-row {
+  position: relative;
+  transition: background-color 140ms ease;
+}
+
+.icloud-list-row:hover {
+  background-color: var(--icloud-row-hover);
+}
+
+.icloud-list-row + .icloud-list-row::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  inset-inline-start: 1rem;
+  inset-inline-end: 1rem;
+  height: 1px;
+  background: var(--icloud-hairline);
+}
+
+/* Clean Squircle Icon Tile */
+.icloud-squircle {
+  border-radius: 22.5%;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+/* Segmented Control (Flat Pill Bar) */
+.icloud-segmented {
+  background: hsl(var(--secondary));
+  border: 1px solid var(--icloud-hairline);
+  border-radius: 12px;
+  padding: 3px;
+}
+
+.icloud-segmented-item {
+  border-radius: 9px;
+  font-weight: 500;
+  transition: background-color 160ms ease, color 160ms ease, box-shadow 160ms ease;
+}
+
+.icloud-segmented-item[data-active="true"] {
+  background: var(--icloud-pane-solid);
+  color: hsl(var(--foreground));
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.09);
+}
+
+.dark .icloud-segmented-item[data-active="true"] {
+  background: #3a3a3f;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+
+/* Signature Unread Blue Dot */
+.icloud-unread-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  background-color: hsl(var(--primary));
+  flex-shrink: 0;
+}
+
+/* Toolbar Icon Button */
+.icloud-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 34px;
+  min-width: 34px;
+  padding: 0 0.5rem;
+  border-radius: 9999px;
+  background: transparent;
+  color: hsl(var(--foreground) / 0.78);
+  transition: background-color 140ms ease, color 140ms ease, transform 110ms ease;
+}
+
+.icloud-icon-btn:hover {
+  background-color: var(--icloud-row-hover);
+  color: hsl(var(--foreground));
+}
+
+.icloud-icon-btn:active {
+  transform: scale(0.95);
+}
+
+/* Solid Flat Primary Button */
+.icloud-btn-primary {
+  background-color: hsl(var(--primary));
+  color: #ffffff;
+  border-radius: 9999px;
+  font-weight: 600;
+  transition: background-color 140ms ease, transform 110ms ease, opacity 140ms ease;
+}
+
+.icloud-btn-primary:hover {
+  opacity: 0.92;
+}
+
+html[data-design="apple"] .icloud-btn-primary:hover {
+  background-color: hsl(211 100% 41%);
+  opacity: 1;
+}
+
+html.dark[data-design="apple"] .icloud-btn-primary:hover {
+  background-color: hsl(210 100% 57%);
+}
+
+.icloud-btn-primary:active {
+  transform: scale(0.98);
+}
+
+/* Video Stream Card Thumbnail Frame */
+.icloud-video-thumb {
+  position: relative;
+  overflow: hidden;
+  border-radius: 14px;
+  background-color: #1c1c1e;
+  border: 1px solid var(--icloud-hairline);
+}
+
+/* Focus Rings & Form Controls (Apple mode) */
+html[data-design="apple"] input,
+html[data-design="apple"] textarea,
+html[data-design="apple"] select {
+  transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
+}
+
+html[data-design="apple"] input:focus-visible,
+html[data-design="apple"] textarea:focus-visible,
+html[data-design="apple"] select:focus-visible {
+  outline: none;
+  border-color: hsl(var(--primary)) !important;
+  box-shadow: 0 0 0 3px hsl(var(--primary) / 0.18) !important;
+}
+
+html[data-design="apple"] [role="dialog"] {
+  border-color: var(--icloud-hairline-strong) !important;
+  box-shadow: var(--icloud-shadow-lg) !important;
+}
+
+/* Thin Scrollbars in Apple mode */
+html[data-design="apple"] ::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+html[data-design="apple"] ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+html[data-design="apple"] ::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.24);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+html[data-design="apple"] ::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.42);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+/* ==========================================================================
+   MAGIC DESIGN TRANSITION: SLANTED DIAGONAL SWEEP + ELEMENT-BY-ELEMENT FLIP
+   ========================================================================== */
+@keyframes design-morph-flip-kf {
+  0% {
+    transform: perspective(1100px) rotateY(0deg) translateY(0) scale(1);
+    filter: brightness(1);
+  }
+  38% {
+    transform: perspective(1100px) rotateY(-14deg) translateY(-4px) scale(0.975);
+    filter: brightness(1.07);
+    box-shadow: 0 16px 36px -10px hsl(var(--primary) / 0.28);
+  }
+  100% {
+    transform: perspective(1100px) rotateY(0deg) translateY(0) scale(1);
+    filter: brightness(1);
+  }
+}
+
+.design-morph-flip {
+  animation: design-morph-flip-kf 480ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, filter;
+}
+
+@keyframes design-ribbon-sweep-rtl {
+  0% {
+    transform: translate3d(125vw, 0, 0) skewX(-16deg);
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  88% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate3d(-125vw, 0, 0) skewX(-16deg);
+    opacity: 0;
+  }
+}
+
+@keyframes design-ribbon-sweep-ltr {
+  0% {
+    transform: translate3d(-125vw, 0, 0) skewX(-16deg);
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  88% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate3d(125vw, 0, 0) skewX(-16deg);
+    opacity: 0;
+  }
+}
+
+.design-ribbon-sweep-rtl {
+  animation: design-ribbon-sweep-rtl 920ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.design-ribbon-sweep-ltr {
+  animation: design-ribbon-sweep-ltr 920ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .design-morph-flip,
+  .design-ribbon-sweep-rtl,
+  .design-ribbon-sweep-ltr {
+    animation: none !important;
+  }
+}

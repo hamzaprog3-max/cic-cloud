@@ -14,6 +14,8 @@ import DhikrBanner from "./components/DhikrBanner";
 import YearPickerModal from "./components/YearPickerModal";
 import OfflineBanner from "./components/OfflineBanner";
 import OfflineIntroPrompt from "./components/OfflineIntroPrompt";
+import { DesignProvider } from "./hooks/use-design";
+import { DesignMagicOverlay } from "./components/DesignMagicOverlay";
 
 import Index from "./pages/Index";
 import YearDepartmentsPage from "./pages/YearDepartmentsPage";
@@ -115,8 +117,9 @@ const AppContent = () => {
       <NotificationPrompt />
       <InstallPrompt />
       <YearPickerModal />
-      <div className="relative z-10">
+      <div className="relative z-10 min-h-screen">
         <AnimatedRoutes />
+        <DesignMagicOverlay />
       </div>
     </>
   );
@@ -125,13 +128,15 @@ const AppContent = () => {
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <I18nProvider>
-      <TooltipProvider>
-        <Toaster />
-        <Sonner />
-        <BrowserRouter>
-          <AppContent />
-        </BrowserRouter>
-      </TooltipProvider>
+      <DesignProvider>
+        <TooltipProvider>
+          <Toaster />
+          <Sonner />
+          <BrowserRouter>
+            <AppContent />
+          </BrowserRouter>
+        </TooltipProvider>
+      </DesignProvider>
     </I18nProvider>
   </QueryClientProvider>
 );

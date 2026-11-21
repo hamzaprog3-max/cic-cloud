@@ -17,6 +17,20 @@ export function safeFormatDate(dateVal: any, formatStr: string, options?: any) {
   }
 }
 
+/**
+ * Parse a deadline string consistently across the app.
+ * Date-only strings ("YYYY-MM-DD") default to local end-of-day (23:59:59)
+ * instead of UTC midnight, preventing premature expiry in Egypt (UTC+2/+3).
+ */
+export function parseDeadlineDate(raw?: string | null): Date | null {
+  if (!raw) return null;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return null;
+  const normalized = trimmed.includes("T") ? trimmed : `${trimmed}T23:59:59`;
+  const d = new Date(normalized);
+  return isValid(d) ? d : null;
+}
+
 export function slugify(text: string) {
   if (!text) return "";
   return text.toString().toLowerCase().trim()

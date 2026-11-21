@@ -1,22 +1,53 @@
 import { motion, AnimatePresence } from "framer-motion";
-import { FileText, ExternalLink, Clock, Archive, Trash2, Download, Pencil, X, Save, Link, Share2, GripVertical, ChevronDown, ChevronUp, Copy, BookOpen, Sparkles } from "lucide-react";
+import {
+  FileText,
+  ExternalLink,
+  Clock,
+  Archive,
+  ArchiveRestore,
+  Trash2,
+  Download,
+  Pencil,
+  X,
+  Save,
+  Link,
+  Share2,
+  GripVertical,
+  ChevronDown,
+  ChevronUp,
+  Copy,
+  BookOpen,
+  Sparkles,
+  PlayCircle,
+  Play,
+  Radio,
+  CheckCircle2,
+  AlertCircle,
+} from "lucide-react";
 import type { Material, MaterialCategory, Course } from "@/lib/store";
 import { db } from "@/lib/store";
 import { useI18n } from "@/lib/i18n";
 import { isPast } from "date-fns";
-import { safeFormatDate, slugify, coursePath } from "@/lib/utils";
+import { safeFormatDate, slugify, coursePath, normalizeLink, parseDeadlineDate } from "@/lib/utils";
 import { ar, enUS } from "date-fns/locale";
 import { playClickSfx } from "@/hooks/use-sfx";
-import { useState, lazy, Suspense } from "react";
-const PdfViewerModal = lazy(() => import("@/components/PdfViewerModal"));
-const VideoViewerModal = lazy(() => import("@/components/VideoViewerModal"));
-const AiLectureExplainerModal = lazy(() => import("@/components/AiLectureExplainerModal"));
-// const ExternalLinkModal = lazy(() => import("@/components/ExternalLinkModal"));
+import { useState, useMemo, lazy, Suspense } from "react";
 import { OfflineMaterialButton } from "./OfflineMaterialButton";
+import { downloadFileDirectly } from "@/lib/download";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
-import { PlayCircle } from "lucide-react";
+import { useDesign } from "@/hooks/use-design";
+import {
+  isCloudinaryVideoUrl,
+  isOfflineCacheableUrl,
+  isPlayableMediaUrl,
+  parseCloudinaryVideo,
+} from "@/lib/cloudinary";
+
+const PdfViewerModal = lazy(() => import("@/components/PdfViewerModal"));
+const VideoViewerModal = lazy(() => import("@/components/VideoViewerModal"));
+const AiLectureExplainerModal = lazy(() => import("@/components/AiLectureExplainerModal"));
 
 interface Props {
   material: Material;
@@ -26,11 +57,11 @@ interface Props {
   showEdit?: boolean;
   highlightedId?: string | null;
   onArchive?: (id: string) => void;
+  onUnarchive?: (id: string) => void;
   onDelete?: (id: string) => void;
   onUpdate?: () => void;
   categories?: MaterialCategory[];
   courses?: Course[];
-  // DnD handle props (from useSortable)
   dragHandleListeners?: Record<string, Function>;
   dragHandleAttributes?: Record<string, any>;
   style?: React.CSSProperties;
@@ -44,6 +75,7 @@ const MaterialCard = ({
   showEdit = true,
   highlightedId,
   onArchive,
+  onUnarchive,
   onDelete,
   onUpdate,
   categories = [],
@@ -53,21 +85,50 @@ const MaterialCard = ({
   style,
 }: Props) => {
   const { t, lang } = useI18n();
+  const { isApple } = useDesign();
   const locale = lang === "ar" ? ar : enUS;
-  const deadlinePast = material.deadline && isPast(new Date(material.deadline));
+  const parsedDeadline = parseDeadlineDate(material.deadline);
+  const deadlinePast = Boolean(parsedDeadline && isPast(parsedDeadline));
   const isHighlighted = highlightedId === material.id;
-  const isRecent = Boolean(material.created_at && (Date.now() - new Date(material.created_at).getTime()) < 3 * 24 * 60 * 60 * 1000);
+  const isRecent = Boolean(
+    material.created_at &&
+      Date.now() - new Date(material.created_at).getTime() < 3 * 24 * 60 * 60 * 1000
+  );
 
-  // Edit modal state
+  // Resolve Cloudinary stream URL (dedicated video_url OR legacy fallback in pdf_url / external_link)
+  const cloudinaryStreamUrl = useMemo(() => {
+    if (material.video_url && isCloudinaryVideoUrl(material.video_url)) return material.video_url;
+    if (material.video_url) return material.video_url;
+    if (material.pdf_url && isCloudinaryVideoUrl(material.pdf_url)) return material.pdf_url;
+    if (material.external_link && isCloudinaryVideoUrl(material.external_link)) return material.external_link;
+    return null;
+  }, [material.video_url, material.pdf_url, material.external_link]);
+
+  const parsedStream = useMemo(
+    () => (cloudinaryStreamUrl ? parseCloudinaryVideo(cloudinaryStreamUrl) : null),
+    [cloudinaryStreamUrl]
+  );
+
+  const safePdfUrl = useMemo(() => normalizeLink(material.pdf_url), [material.pdf_url]);
+  const safeExternalLink = useMemo(() => normalizeLink(material.external_link), [material.external_link]);
+  const safeSubmissionLink = useMemo(() => normalizeLink(material.submission_link), [material.submission_link]);
+
+  // Don't duplicate pdf_url / external_link row if it IS the Cloudinary stream already shown in the stream card
+  const showPdfSection = Boolean(safePdfUrl && safePdfUrl !== cloudinaryStreamUrl);
+  const showExternalSection = Boolean(safeExternalLink && safeExternalLink !== cloudinaryStreamUrl);
+
   const [pdfViewerOpen, setPdfViewerOpen] = useState(false);
-  const [videoViewerOpen, setVideoViewerOpen] = useState(false);
+  const [videoViewerUrl, setVideoViewerUrl] = useState<string | null>(null);
   const [aiExplainerOpen, setAiExplainerOpen] = useState(false);
-  // const [activeLinkUrl, setActiveLinkUrl] = useState<string | null>(null);
+  const [posterFailed, setPosterFailed] = useState(false);
+
+  // Admin Edit modal state
   const [editOpen, setEditOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editTitle, setEditTitle] = useState(material.title);
   const [editCourseId, setEditCourseId] = useState(material.course_id);
   const [editCategoryId, setEditCategoryId] = useState(material.category_id || "");
+  const [editVideoUrl, setEditVideoUrl] = useState(cloudinaryStreamUrl || "");
   const [editExternalLink, setEditExternalLink] = useState(material.external_link || "");
   const [editSubmissionLink, setEditSubmissionLink] = useState(material.submission_link || "");
   const [editDeadline, setEditDeadline] = useState(
@@ -81,6 +142,11 @@ const MaterialCard = ({
   const [editNotes, setEditNotes] = useState(material.notes || "");
   const [isExpanded, setIsExpanded] = useState(false);
 
+  const editVideoValidation = useMemo(() => {
+    if (!editVideoUrl.trim()) return null;
+    return parseCloudinaryVideo(editVideoUrl, { requireCloudinary: true });
+  }, [editVideoUrl]);
+
   const copyListContent = (e: React.MouseEvent) => {
     e.stopPropagation();
     playClickSfx();
@@ -92,17 +158,27 @@ const MaterialCard = ({
 
   const renderListContent = (content: string) => {
     const urlRegex = /(https?:\/\/[^\s]+)/g;
-    return content.split('\n').map((line, i) => {
+    return content.split("\n").map((line, i) => {
       const parts = line.split(urlRegex);
       return (
         <div key={i} className="mb-2 last:mb-0 min-h-[1.5rem]">
           {parts.map((part, j) => {
-            if (part.match(urlRegex)) {
-              return (
-                <a key={j} href={part} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline break-all" onClick={(e) => e.stopPropagation()}>
-                  {part}
-                </a>
-              );
+            if (urlRegex.test(part)) {
+              const safeHref = normalizeLink(part);
+              if (safeHref) {
+                return (
+                  <a
+                    key={j}
+                    href={safeHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary hover:underline break-all"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {part}
+                  </a>
+                );
+              }
             }
             return <span key={j}>{part}</span>;
           })}
@@ -116,6 +192,7 @@ const MaterialCard = ({
     setEditTitle(material.title);
     setEditCourseId(material.course_id);
     setEditCategoryId(material.category_id || "");
+    setEditVideoUrl(material.video_url || (cloudinaryStreamUrl || ""));
     setEditExternalLink(material.external_link || "");
     setEditSubmissionLink(material.submission_link || "");
     setEditDeadline(material.deadline ? material.deadline.slice(0, 16) : "");
@@ -133,16 +210,30 @@ const MaterialCard = ({
       toast.error(lang === "ar" ? "العنوان مطلوب" : "Title is required");
       return;
     }
+
+    let finalVideoUrl: string | null = null;
+    if (editVideoUrl.trim()) {
+      const parsedVal = parseCloudinaryVideo(editVideoUrl, { requireCloudinary: true });
+      if (!parsedVal.isValid) {
+        toast.error(parsedVal.error || (lang === "ar" ? "رابط Cloudinary غير صالح" : "Invalid Cloudinary URL"));
+        return;
+      }
+      finalVideoUrl = parsedVal.normalizedUrl;
+    }
+
     setSaving(true);
     try {
       await db.updateMaterial(material.id, {
         title: editTitle.trim(),
         course_id: editCourseId,
         category_id: editCategoryId || null,
-        external_link: editExternalLink || null,
-        submission_link: material.is_assignment ? (editSubmissionLink || null) : null,
+        video_url: finalVideoUrl,
+        external_link: editExternalLink.trim() ? normalizeLink(editExternalLink) : null,
+        submission_link: material.is_assignment && editSubmissionLink.trim()
+          ? normalizeLink(editSubmissionLink)
+          : null,
         deadline: editDeadline || null,
-        pdf_display_name: editPdfDisplayName || null,
+        pdf_display_name: editPdfDisplayName.trim() || null,
         is_list: editIsList,
         is_reference: editIsReference,
         list_content: editIsList ? editListContent : null,
@@ -152,7 +243,6 @@ const MaterialCard = ({
       toast.success(lang === "ar" ? "تم التعديل بنجاح ✅" : "Updated successfully ✅");
       setEditOpen(false);
       onUpdate?.();
-      // Audit log for edit
       db.addAuditLog(`تعديل مادة: ${editTitle.trim()}`, `ID: ${material.id}`, {
         action_type: "edit",
         related_material_id: material.id,
@@ -164,18 +254,411 @@ const MaterialCard = ({
     }
   };
 
+  // Precompute shared PDF/media action info cleanly once for both designs
+  const pdfAction = useMemo(() => {
+    if (!showPdfSection || !safePdfUrl) return null;
+    const isVideo = isPlayableMediaUrl(safePdfUrl, material.pdf_display_name);
+    const isSupabaseDoc =
+      (safePdfUrl.includes("supabase.co") ||
+        safePdfUrl.includes("r2.dev") ||
+        safePdfUrl.includes("r2.cloudflarestorage.com")) &&
+      !isVideo;
+
+    const buildDownloadName = (rawFilename: string) => {
+      const extMatch = rawFilename.match(/\.[0-9a-z]+$/i);
+      let ext = extMatch ? extMatch[0] : "";
+      if (!ext) {
+        if (isVideo) ext = ".mp4";
+        else if (isSupabaseDoc) ext = ".pdf";
+      }
+      let name = material.pdf_display_name || material.title || "download";
+      if (ext && !name.toLowerCase().endsWith(ext.toLowerCase())) {
+        name = `${name}${ext}`;
+      }
+      return name;
+    };
+
+    const getDownloadUrl = (url: string) => {
+      try {
+        const urlObj = new URL(url);
+        if (
+          urlObj.hostname.includes("r2.dev") ||
+          urlObj.hostname.includes("r2.cloudflarestorage.com")
+        ) {
+          const key = decodeURIComponent(urlObj.pathname.replace(/^\/+/, ""));
+          const filename = key.split("/").pop() || key;
+          const name = buildDownloadName(filename);
+          const apiBase =
+            typeof window !== "undefined" && window.location.hostname.includes("cic-cloud.com")
+              ? ""
+              : "https://cic-cloud.com";
+          return `${apiBase}/api/r2/download?key=${encodeURIComponent(key)}&name=${encodeURIComponent(name)}`;
+        }
+        if (urlObj.hostname.includes("supabase.co")) {
+          const pathParts = urlObj.pathname.split("/");
+          const filename = pathParts[pathParts.length - 1];
+          urlObj.searchParams.set("download", buildDownloadName(filename));
+          return urlObj.toString();
+        }
+        return url;
+      } catch {
+        return url;
+      }
+    };
+
+    return {
+      isVideo,
+      isSupabaseDoc,
+      downloadUrl: getDownloadUrl(safePdfUrl),
+      filenameToSave: buildDownloadName(material.pdf_display_name || material.title),
+    };
+  }, [showPdfSection, safePdfUrl, material.pdf_display_name, material.title]);
+
+  const handleShareMaterial = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    playClickSfx();
+    const courseObj = courses.find((c) => c.id === material.course_id);
+    let url: URL;
+    if (courseObj) {
+      url = new URL(window.location.origin + coursePath(courseObj, courses));
+    } else {
+      url = new URL(window.location.origin + `/course/${material.course_id}`);
+    }
+
+    if (material.category_id) {
+      const cat = categories?.find((c) => c.id === material.category_id);
+      if (courseObj && cat) {
+        const catSlug = slugify(cat.name_en) || slugify(cat.name_ar) || cat.id;
+        url = new URL(window.location.origin + `${coursePath(courseObj, courses)}/${catSlug}`);
+      } else {
+        url.searchParams.set("category", material.category_id);
+      }
+    }
+    url.searchParams.set("material", material.id);
+
+    const shareTitle = material.title;
+    const shareText =
+      lang === "ar"
+        ? `شاهد "${material.title}" على منصة CIC Cloud`
+        : `Check out "${material.title}" on CIC Cloud`;
+    const shareUrl = url.toString();
+
+    if (navigator.share) {
+      navigator
+        .share({ title: shareTitle, text: shareText, url: shareUrl })
+        .catch(() => {
+          navigator.clipboard
+            .writeText(`${shareTitle}\n${shareUrl}`)
+            .then(() => toast.success(t("material.linkCopied")))
+            .catch(() => undefined);
+        });
+    } else {
+      navigator.clipboard
+        .writeText(`${shareTitle}\n${shareUrl}`)
+        .then(() => toast.success(t("material.linkCopied")))
+        .catch(() => toast.error(t("material.shareFail")));
+    }
+  };
+
+  const hasBadges = Boolean(
+    isRecent ||
+      material.is_reference ||
+      cloudinaryStreamUrl ||
+      material.is_assignment ||
+      (material.section_number && material.section_number !== "all")
+  );
+
+  const adminControls = isAdmin ? (
+    <div className="flex items-center gap-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 focus-within:opacity-100 transition-opacity shrink-0">
+      {showEdit && (
+        <button
+          type="button"
+          onClick={openEdit}
+          title={lang === "ar" ? "تعديل" : "Edit"}
+          className="icloud-icon-btn hover:text-primary"
+        >
+          <Pencil className="w-4 h-4" />
+        </button>
+      )}
+      {showEdit && onArchive && !material.archived && (
+        <button
+          type="button"
+          onClick={() => onArchive(material.id)}
+          title={lang === "ar" ? "أرشفة" : "Archive"}
+          className="icloud-icon-btn"
+        >
+          <Archive className="w-4 h-4" />
+        </button>
+      )}
+      {showEdit && onUnarchive && material.archived && (
+        <button
+          type="button"
+          onClick={() => onUnarchive(material.id)}
+          title={t("admin.unarchive")}
+          className="icloud-icon-btn hover:text-emerald-600"
+        >
+          <ArchiveRestore className="w-4 h-4" />
+        </button>
+      )}
+      {showDelete && onDelete && (
+        <button
+          type="button"
+          onClick={() => onDelete(material.id)}
+          title={lang === "ar" ? "حذف" : "Delete"}
+          className="icloud-icon-btn hover:text-destructive"
+        >
+          <Trash2 className="w-4 h-4" />
+        </button>
+      )}
+    </div>
+  ) : null;
+
+  const badgePills = hasBadges ? (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {isRecent && isApple && (
+        <span className="icloud-unread-dot" title={lang === "ar" ? "جديد" : "New"} />
+      )}
+      {isRecent && (
+        <span
+          className={
+            isApple
+              ? "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-primary/12 text-primary"
+              : "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30"
+          }
+        >
+          <Sparkles className="w-2.5 h-2.5" />
+          {lang === "ar" ? (isApple ? "جديد" : "جديد مُحدّث") : "New"}
+        </span>
+      )}
+      {material.is_reference && (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-400">
+          <BookOpen className="w-3 h-3" />
+          {lang === "ar" ? "مرجع المادة" : "Reference"}
+        </span>
+      )}
+      {cloudinaryStreamUrl && (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-500/12 text-indigo-600 dark:text-indigo-400">
+          <Radio className="w-2.5 h-2.5" />
+          {t("admin.streamBadge")}
+        </span>
+      )}
+      {material.is_assignment && (
+        <span
+          className={
+            isApple
+              ? "inline-block text-[10px] font-semibold px-2 py-0.5 rounded-full bg-rose-500/12 text-rose-600 dark:text-rose-400"
+              : "inline-block text-[10px] font-semibold px-2 py-0.5 rounded-full bg-primary/12 text-primary"
+          }
+        >
+          {t("material.assignment")}
+        </span>
+      )}
+      {material.section_number && material.section_number !== "all" && (
+        <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-secondary text-foreground/80">
+          {material.section_number.startsWith("سكشن")
+            ? material.section_number
+            : lang === "ar"
+              ? `سكشن ${material.section_number}`
+              : `Sec ${material.section_number}`}
+        </span>
+      )}
+    </div>
+  ) : null;
+
+  const streamPreviewBlock =
+    cloudinaryStreamUrl && parsedStream?.isValid ? (
+      <div className="mt-3">
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            playClickSfx();
+            setVideoViewerUrl(cloudinaryStreamUrl);
+          }}
+          className="icloud-video-thumb w-full max-w-md group/vid text-start block cursor-pointer"
+        >
+          <div className="relative aspect-[16/9] w-full flex items-center justify-center overflow-hidden">
+            {parsedStream.posterUrl && !posterFailed ? (
+              <img
+                src={parsedStream.posterUrl}
+                alt={material.title}
+                loading="lazy"
+                onError={() => setPosterFailed(true)}
+                className="w-full h-full object-cover group-hover/vid:scale-[1.03] transition-transform duration-300"
+              />
+            ) : (
+              <div className="w-full h-full bg-[#1c1c1e] flex items-center justify-center">
+                <Radio className="w-12 h-12 text-white/20" />
+              </div>
+            )}
+            <div className="absolute inset-0 bg-black/35" />
+            <div className="absolute inset-0 flex items-center justify-center">
+              <span className="w-14 h-14 rounded-full bg-white/90 text-[#1d1d1f] flex items-center justify-center shadow-2xl group-hover/vid:scale-110 transition-transform">
+                <Play className="w-6 h-6 fill-current ms-0.5" />
+              </span>
+            </div>
+            <div className="absolute bottom-2.5 inset-x-3 flex items-center justify-between gap-2 text-white">
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold">
+                <PlayCircle className="w-4 h-4 text-[#64d2ff]" />
+                {t("admin.watchStream")}
+              </span>
+              <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-black/55 backdrop-blur-md border border-white/15">
+                {parsedStream.streamTypeLabel[lang === "ar" ? "ar" : "en"]}
+              </span>
+            </div>
+          </div>
+        </button>
+      </div>
+    ) : null;
+
+  const extraDetailsBlock = (
+    <>
+      {material.is_assignment && safeSubmissionLink && (
+        <a
+          href={safeSubmissionLink}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => {
+            e.stopPropagation();
+            playClickSfx();
+          }}
+          className={`mt-3 inline-flex items-center gap-2 text-xs font-semibold px-3.5 py-2 ${
+            isApple
+              ? "icloud-btn-primary"
+              : "rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+          }`}
+        >
+          <Link className="w-3.5 h-3.5" />
+          {lang === "ar" ? "رابط تسليم التكليف" : "Submit Assignment"}
+        </a>
+      )}
+
+      {material.notes && (
+        <div className="mt-3 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-foreground/90 leading-relaxed flex items-start gap-2">
+          <span className="text-sm shrink-0">📝</span>
+          <div className="flex-1 whitespace-pre-wrap">
+            <span className="font-semibold text-amber-700 dark:text-amber-400 block mb-0.5">
+              {lang === "ar" ? "ملحوظات:" : "Notes:"}
+            </span>
+            {material.notes}
+          </div>
+        </div>
+      )}
+
+      {material.is_list && (
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              playClickSfx();
+              setIsExpanded(!isExpanded);
+            }}
+            className="inline-flex items-center gap-1 text-xs font-semibold text-primary hover:underline cursor-pointer"
+          >
+            {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            {lang === "ar" ? "عرض القائمة" : "View List"}
+          </button>
+          <AnimatePresence>
+            {isExpanded && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: "auto", opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                className="overflow-hidden mt-2.5"
+              >
+                <div className="bg-secondary/50 border border-border/60 rounded-xl p-4 text-sm text-foreground relative whitespace-pre-wrap">
+                  <button
+                    type="button"
+                    onClick={copyListContent}
+                    className="absolute top-2.5 end-2.5 p-1.5 rounded-lg hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+                    title={lang === "ar" ? "نسخ" : "Copy"}
+                  >
+                    <Copy className="w-4 h-4" />
+                  </button>
+                  <div className="pt-1 pe-7">{renderListContent(material.list_content || "")}</div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      )}
+    </>
+  );
+
+  const openViewerButton = pdfAction && safePdfUrl ? (
+    pdfAction.isSupabaseDoc ? (
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          playClickSfx();
+          setPdfViewerOpen(true);
+        }}
+        className={
+          isApple
+            ? "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-primary/10 hover:bg-primary/20 text-primary font-semibold transition-colors mac-cursor"
+            : "inline-flex items-center gap-1.5 text-primary hover:underline font-medium cursor-pointer"
+        }
+        id={`view-pdf-${material.id}`}
+      >
+        <FileText className="w-3.5 h-3.5" />
+        <span>{material.pdf_display_name || t("pdfViewer.viewPdf")}</span>
+      </button>
+    ) : pdfAction.isVideo ? (
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          playClickSfx();
+          setVideoViewerUrl(safePdfUrl);
+        }}
+        className={
+          isApple
+            ? "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-primary/10 hover:bg-primary/20 text-primary font-semibold transition-colors mac-cursor"
+            : "inline-flex items-center gap-1.5 text-primary hover:underline font-medium cursor-pointer"
+        }
+      >
+        <PlayCircle className="w-3.5 h-3.5" />
+        <span>{material.pdf_display_name || (lang === "ar" ? "تشغيل" : "Play")}</span>
+      </button>
+    ) : (
+      <a
+        href={safePdfUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={(e) => {
+          e.stopPropagation();
+          playClickSfx();
+        }}
+        className={
+          isApple
+            ? "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-primary/10 hover:bg-primary/20 text-primary font-semibold transition-colors mac-cursor"
+            : "inline-flex items-center gap-1.5 text-primary hover:underline font-medium cursor-pointer"
+        }
+      >
+        <FileText className="w-3.5 h-3.5" />
+        <span>{material.pdf_display_name || t("pdfViewer.viewPdf")}</span>
+      </a>
+    )
+  ) : null;
+
   return (
     <>
       <motion.div
         id={`material-${material.id}`}
-        initial={{ opacity: 0, y: 10 }}
+        data-design-morph
+        initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: Math.min(index * 0.03, 0.3), duration: 0.25, ease: "easeOut" }}
-        whileHover={{ y: -4, scale: 1.01 }}
-        className={`glass-card rounded-xl p-5 group relative overflow-hidden ${material.archived ? "opacity-60" : ""} ${isHighlighted ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : ""} ${material.is_reference ? "border border-amber-500/30 bg-amber-500/5 shadow-[0_0_15px_rgba(245,158,11,0.1)]" : ""}`}
+        transition={{ delay: Math.min(index * 0.025, 0.25), duration: 0.22, ease: "easeOut" }}
+        className={`glass-card group relative overflow-hidden ${
+          isApple ? "rounded-[18px] px-4 py-3.5 sm:px-5 sm:py-4" : "rounded-xl p-4 sm:p-5"
+        } ${material.archived ? "opacity-65" : ""} ${
+          isHighlighted ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : ""
+        } ${material.is_reference ? "ring-1 ring-amber-500/35 bg-amber-500/[0.04]" : ""}`}
         style={{ ...style }}
       >
-        {/* Drag handle — only shown when DnD props are provided */}
+        {/* Drag handle when sortable */}
         {dragHandleListeners && (
           <button
             type="button"
@@ -187,263 +670,121 @@ const MaterialCard = ({
             <GripVertical className="w-4 h-4" />
           </button>
         )}
-        <div className={`absolute top-0 start-0 w-1 h-full ${material.is_reference ? "bg-amber-500" : "bg-primary"} rounded-s-xl opacity-60 group-hover:opacity-100 transition-opacity ${dragHandleListeners ? "ms-6" : ""}`} />
 
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex-1 min-w-0">
-            {(isRecent || material.is_reference) && (
-              <div className="flex flex-wrap items-center gap-1.5 mb-1.5">
-                {isRecent && (
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30">
-                    <Sparkles className="w-2.5 h-2.5" /> {lang === "ar" ? "جديد مُحدّث" : "Recently Added"}
-                  </span>
-                )}
-                {material.is_reference && (
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/10 text-amber-500">
-                    <BookOpen className="w-3 h-3" /> {lang === "ar" ? "مرجع المادة" : "Course Reference"}
-                  </span>
-                )}
+        {/* Classic start vertical accent strip */}
+        {!isApple && (
+          <div
+            className={`absolute top-0 start-0 w-1 h-full ${
+              material.is_reference ? "bg-amber-500" : "bg-primary"
+            } rounded-s-xl opacity-70 group-hover:opacity-100 transition-opacity ${
+              dragHandleListeners ? "ms-6" : ""
+            }`}
+          />
+        )}
+
+        {isApple ? (
+          /* ================= APPLE macOS UNIFIED MATERIAL CARD ================= */
+          <div className={dragHandleListeners ? "ps-5" : ""}>
+            {/* Row 1: Single unified header row (Title + inline badges + Upload date on SAME row) */}
+            <div className="flex items-center justify-between gap-3 flex-wrap sm:flex-nowrap">
+              <div className="flex items-center gap-2.5 min-w-0 flex-1 flex-wrap">
+                <div
+                  className={`w-8 h-8 rounded-[10px] flex items-center justify-center shrink-0 ${
+                    cloudinaryStreamUrl
+                      ? "bg-indigo-500/15 text-indigo-600 dark:text-indigo-400"
+                      : material.is_reference
+                        ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                        : "bg-primary/12 text-primary"
+                  }`}
+                >
+                  {cloudinaryStreamUrl ? (
+                    <Play className="w-4 h-4 fill-current" />
+                  ) : (
+                    <FileText className="w-4 h-4" />
+                  )}
+                </div>
+                <h3 className="font-semibold text-[15px] text-foreground truncate leading-snug max-w-full">
+                  {material.title}
+                </h3>
+                {badgePills}
               </div>
-            )}
-            <div className="flex items-center gap-2 mb-2">
-              <FileText className="w-4 h-4 text-primary shrink-0" />
-              <h3 className={`font-display truncate ${material.is_list ? "font-bold text-base" : "font-semibold text-sm"}`}>{material.title}</h3>
+
+              <div className="flex items-center gap-2 shrink-0 ms-auto">
+                {material.created_at && (
+                  <span className="text-[11px] text-muted-foreground flex items-center gap-1 whitespace-nowrap">
+                    <Clock className="w-2.5 h-2.5" />
+                    {safeFormatDate(material.created_at, "dd MMM yyyy", { locale })}
+                  </span>
+                )}
+                {adminControls}
+              </div>
             </div>
 
-            {/* Upload date */}
-            {material.created_at && (
-              <p className="text-[11px] text-muted-foreground/70 mb-1.5 flex items-center gap-1">
-                <Clock className="w-2.5 h-2.5" />
-                {lang === "ar" ? "تاريخ الرفع: " : "Uploaded: "}
-                {safeFormatDate(material.created_at, "dd MMM yyyy", { locale })}
-              </p>
-            )}
+            {streamPreviewBlock}
 
-            <div className="flex flex-wrap items-center gap-1.5 mb-2">
-              {material.is_assignment && (
-                <span className="inline-block text-xs font-medium px-2 py-0.5 rounded-full bg-primary/10 text-primary">
-                  {t("material.assignment")}
-                </span>
-              )}
-              {material.section_number && material.section_number !== "all" && (
-                <span className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full bg-primary/15 text-primary border border-primary/25">
-                  <span>📌</span>
-                  <span>{material.section_number.startsWith("سكشن") ? material.section_number : (lang === "ar" ? `سكشن ${material.section_number}` : `Sec ${material.section_number}`)}</span>
-                </span>
-              )}
-            </div>
-
-            <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+            {/* Row 2: Unified, harmonious action pills row (No split boxes, no gaps!) */}
+            <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
               {material.is_assignment && !material.deadline && (
-                <span className="flex items-center gap-1 text-primary">
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-primary/10 text-primary font-medium">
                   <Clock className="w-3 h-3" />
                   {lang === "ar" ? "مفتوح (بدون موعد نهائي)" : "Open-ended"}
                 </span>
               )}
               {material.deadline && (
-                <span className={`flex items-center gap-1 ${deadlinePast ? "text-destructive" : ""}`}>
+                <span
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full font-medium ${
+                    deadlinePast
+                      ? "bg-destructive/12 text-destructive"
+                      : "bg-secondary text-foreground/80"
+                  }`}
+                >
                   <Clock className="w-3 h-3" />
                   {safeFormatDate(material.deadline, "dd MMM yyyy - hh:mm a", { locale })}
                   {deadlinePast && ` (${t("material.expired")})`}
                 </span>
               )}
-              {material.pdf_url && (
-                (() => {
-                  const isVideo = material.pdf_url.match(/\.(mp4|webm|ogg|mov|mkv|avi|mp3|wav|m4a|aac)$/i) || material.pdf_display_name?.match(/\.(mp4|webm|ogg|mov|mkv|avi|mp3|wav|m4a|aac)$/i);
-                  const isSupabaseDoc = material.pdf_url.includes("supabase.co") && !isVideo;
-                  
-                  const getDownloadUrl = (url: string) => {
-                    try {
-                      const urlObj = new URL(url);
-                      if (urlObj.hostname.includes("supabase.co")) {
-                        const pathParts = urlObj.pathname.split('/');
-                        const filename = pathParts[pathParts.length - 1];
-                        const extMatch = filename.match(/\.[0-9a-z]+$/i);
-                        let ext = extMatch ? extMatch[0] : '';
-                        
-                        if (!ext) {
-                          if (isVideo) ext = '.mp4';
-                          else if (isSupabaseDoc) ext = '.pdf';
-                        }
-                        
-                        let name = material.pdf_display_name || material.title || "download";
-                        if (ext && !name.toLowerCase().endsWith(ext.toLowerCase())) {
-                          name = `${name}${ext}`;
-                        }
-                        urlObj.searchParams.set('download', name);
-                        return urlObj.toString();
-                      }
-                      return url;
-                    } catch (e) {
-                      return `${url}?download=`;
-                    }
-                  };
-                  const downloadUrl = getDownloadUrl(material.pdf_url);
-                  
-                  if (isSupabaseDoc) {
-                    return (
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            playClickSfx();
-                            setPdfViewerOpen(true);
-                          }}
-                          className="flex items-center gap-1 text-primary hover:underline cursor-pointer"
-                          id={`view-pdf-${material.id}`}
-                        >
-                          <FileText className="w-3 h-3" /> {material.pdf_display_name || t("pdfViewer.viewPdf")}
-                        </button>
-                        <a 
-                          href={downloadUrl} 
-                          download 
-                          target="_blank" 
-                          rel="noreferrer"
-                          onClick={e => e.stopPropagation()}
-                          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-primary hover:bg-primary/10 px-2 py-1 bg-secondary/50 rounded-full transition-all cursor-pointer"
-                          title={lang === "ar" ? "تحميل على الجهاز" : "Download to Device"}
-                        >
-                          <Download className="w-3.5 h-3.5" />
-                          <span>{lang === "ar" ? "تنزيل (للجهاز)" : "Download (Device)"}</span>
-                        </a>
-                        <OfflineMaterialButton url={material.pdf_url} />
-                      </div>
-                    );
-                  }
-                  
-                  if (isVideo) {
-                    return (
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            playClickSfx();
-                            setVideoViewerOpen(true);
-                          }}
-                          className="flex items-center gap-1 text-primary hover:underline cursor-pointer"
-                        >
-                          <PlayCircle className="w-3 h-3" /> {material.pdf_display_name || (lang === "ar" ? "تشغيل الميديا" : "Play Media")}
-                        </button>
-                        <a 
-                          href={downloadUrl} 
-                          download 
-                          target="_blank" 
-                          rel="noreferrer"
-                          onClick={e => e.stopPropagation()}
-                          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-primary hover:bg-primary/10 px-2 py-1 bg-secondary/50 rounded-full transition-all cursor-pointer"
-                          title={lang === "ar" ? "تحميل على الجهاز" : "Download to Device"}
-                        >
-                          <Download className="w-3.5 h-3.5" />
-                          <span>{lang === "ar" ? "تنزيل (للجهاز)" : "Download (Device)"}</span>
-                        </a>
-                        <OfflineMaterialButton url={material.pdf_url} />
-                      </div>
-                    );
-                  }
 
-                  return (
-                    <div className="flex items-center gap-2">
-                      <a
-                        href={material.pdf_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          playClickSfx();
-                        }}
-                        className="flex items-center gap-1 text-primary hover:underline cursor-pointer"
-                      >
-                        <FileText className="w-3 h-3" /> {material.pdf_display_name || t("pdfViewer.viewPdf")}
-                      </a>
-                      <a 
-                        href={downloadUrl} 
-                        download 
-                        target="_blank" 
-                        rel="noreferrer"
-                        onClick={e => e.stopPropagation()}
-                        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-primary hover:bg-primary/10 px-2 py-1 bg-secondary/50 rounded-full transition-all cursor-pointer"
-                        title={lang === "ar" ? "تحميل على الجهاز" : "Download to Device"}
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                        <span>{lang === "ar" ? "تنزيل (للجهاز)" : "Download (Device)"}</span>
-                      </a>
-                      <OfflineMaterialButton url={material.pdf_url} />
-                    </div>
-                  );
-                })()
+              {openViewerButton}
+
+              {pdfAction && safePdfUrl && (
+                <>
+                  <button
+                    type="button"
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      playClickSfx();
+                      await downloadFileDirectly(pdfAction.downloadUrl, pdfAction.filenameToSave);
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-secondary/80 hover:bg-secondary text-foreground/80 hover:text-foreground border border-border/70 transition-colors mac-cursor font-medium"
+                    title={lang === "ar" ? "تحميل مباشر على جهازك" : "Direct Download"}
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>{lang === "ar" ? "تنزيل" : "Download"}</span>
+                  </button>
+
+                  {isOfflineCacheableUrl(safePdfUrl) && (
+                    <OfflineMaterialButton url={safePdfUrl} />
+                  )}
+                </>
               )}
-              {material.external_link && (
+
+              {showExternalSection && safeExternalLink && (
                 <a
-                  href={material.external_link}
+                  href={safeExternalLink}
                   target="_blank"
                   rel="noopener noreferrer"
                   onClick={(e) => {
                     e.stopPropagation();
                     playClickSfx();
                   }}
-                  className="flex items-center gap-1 text-primary hover:underline cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-secondary/80 hover:bg-secondary text-foreground/80 font-medium transition-colors mac-cursor"
                 >
-                  <ExternalLink className="w-3 h-3" /> {t("material.externalLink")}
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  {t("material.externalLink")}
                 </a>
               )}
-              {/* Share button — visible to everyone */}
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  playClickSfx();
-                  const courseObj = courses.find(c => c.id === material.course_id);
-                  let url: URL;
-                  if (courseObj) {
-                    url = new URL(window.location.origin + coursePath(courseObj, courses));
-                  } else {
-                    url = new URL(window.location.origin + `/course/${material.course_id}`);
-                  }
-                  
-                  if (material.category_id) {
-                    const cat = categories?.find(c => c.id === material.category_id);
-                    if (courseObj && cat) {
-                       const catSlug = slugify(cat.name_en) || slugify(cat.name_ar) || cat.id;
-                       url = new URL(window.location.origin + `${coursePath(courseObj, courses)}/${catSlug}`);
-                    } else {
-                       url.searchParams.set("category", material.category_id);
-                    }
-                  }
-                  url.searchParams.set("material", material.id);
-                  
-                  const shareTitle = material.title;
-                  const shareText = lang === "ar" ? `شاهد "${material.title}" على منصة CIC Cloud` : `Check out "${material.title}" on CIC Cloud`;
-                  const shareUrl = url.toString();
 
-                  if (navigator.share) {
-                    navigator.share({
-                      title: shareTitle,
-                      text: shareText,
-                      url: shareUrl,
-                    }).catch(() => {
-                      // Fallback to clipboard if share gets aborted
-                      const clipboardText = `${shareTitle}\n${shareUrl}`;
-                      navigator.clipboard.writeText(clipboardText).then(() => {
-                        toast.success(t("material.linkCopied"));
-                      });
-                    });
-                  } else {
-                    const clipboardText = `${shareTitle}\n${shareUrl}`;
-                    navigator.clipboard.writeText(clipboardText).then(() => {
-                      toast.success(t("material.linkCopied"));
-                    }).catch(() => {
-                      toast.error(t("material.shareFail"));
-                    });
-                  }
-                }}
-                title={t("material.share")}
-                className="flex items-center gap-1 text-muted-foreground hover:text-primary transition-colors cursor-pointer"
-              >
-                <Share2 className="w-3 h-3" />
-                <span>{t("material.share")}</span>
-              </button>
-
-              {/* AI Study & Explainer button — visible to everyone */}
-              {(material.pdf_url || material.list_content) && (
+              {(showPdfSection || material.list_content) && (
                 <button
                   type="button"
                   onClick={(e) => {
@@ -451,105 +792,152 @@ const MaterialCard = ({
                     playClickSfx();
                     setAiExplainerOpen(true);
                   }}
-                  className="flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full bg-primary/10 text-primary hover:bg-primary/20 border border-primary/25 transition-all cursor-pointer shadow-sm hover:scale-[1.02]"
-                  title={lang === "ar" ? "شرح وتلخيص المحاضرة بالذكاء الاصطناعي" : "AI Study & Explainer"}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-primary/12 hover:bg-primary/20 text-primary font-semibold transition-colors mac-cursor"
+                  title={
+                    lang === "ar"
+                      ? "شرح وتلخيص المحاضرة بالذكاء الاصطناعي"
+                      : "AI Study & Explainer"
+                  }
                 >
-                  <Sparkles className="w-3.5 h-3.5 text-primary animate-pulse" />
+                  <Sparkles className="w-3.5 h-3.5 text-primary" />
                   <span>{lang === "ar" ? "شرح وتلخيص AI" : "AI Explain"}</span>
                 </button>
               )}
 
-            </div>
-
-            {/* Submission Link — shown to everyone for assignments */}
-            {material.is_assignment && material.submission_link && (
-              <a
-                href={material.submission_link}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  playClickSfx();
-                }}
-                className="mt-3 flex items-center gap-2 text-xs font-semibold text-white bg-primary hover:bg-primary/90 transition-colors px-3 py-1.5 rounded-lg w-fit cursor-pointer"
+              <button
+                type="button"
+                onClick={handleShareMaterial}
+                title={t("material.share")}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full bg-secondary/60 hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors mac-cursor"
               >
-                <Link className="w-3 h-3" />
-                {lang === "ar" ? "🔗 رابط تسليم التكليف" : "🔗 Submit Assignment"}
-              </a>
-            )}
-
-            {/* Material Notes with subtle light background */}
-            {material.notes && (
-              <div className="mt-3 p-3 rounded-xl bg-amber-500/10 dark:bg-amber-500/15 border border-amber-500/25 text-xs text-foreground/90 leading-relaxed flex items-start gap-2 shadow-sm">
-                <span className="text-sm shrink-0">📝</span>
-                <div className="flex-1 whitespace-pre-wrap">
-                  <span className="font-semibold text-amber-700 dark:text-amber-400 block mb-0.5">
-                    {lang === "ar" ? "ملحوظات:" : "Notes:"}
-                  </span>
-                  {material.notes}
-                </div>
-              </div>
-            )}
-
-            {material.is_list && (
-              <div className="mt-3">
-                <button 
-                  onClick={(e) => { e.stopPropagation(); playClickSfx(); setIsExpanded(!isExpanded); }}
-                  className="flex items-center gap-1 text-sm font-medium text-primary hover:text-primary/80 transition-colors cursor-pointer"
-                >
-                  {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                  {lang === "ar" ? "عرض القائمة" : "View List"}
-                </button>
-                <AnimatePresence>
-                  {isExpanded && (
-                    <motion.div
-                      initial={{ height: 0, opacity: 0 }}
-                      animate={{ height: "auto", opacity: 1 }}
-                      exit={{ height: 0, opacity: 0 }}
-                      className="overflow-hidden mt-3"
-                    >
-                      <div className="bg-secondary/30 rounded-lg p-4 text-sm text-foreground relative whitespace-pre-wrap">
-                        <button 
-                          onClick={copyListContent}
-                          className="absolute top-2 end-2 p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
-                          title={lang === "ar" ? "نسخ" : "Copy"}
-                        >
-                          <Copy className="w-4 h-4" />
-                        </button>
-                        <div className="pt-2 pe-6">
-                          {renderListContent(material.list_content || "")}
-                        </div>
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-            )}
-          </div>
-
-          {isAdmin && (
-            <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-              {showEdit && (
-                <button onClick={openEdit} title={lang === "ar" ? "تعديل" : "Edit"} className="p-1.5 rounded-lg hover:bg-primary/10 text-muted-foreground hover:text-primary transition-colors">
-                  <Pencil className="w-4 h-4" />
-                </button>
-              )}
-              {showEdit && onArchive && !material.archived && (
-                <button onClick={() => onArchive(material.id)} className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground hover:text-foreground">
-                  <Archive className="w-4 h-4" />
-                </button>
-              )}
-              {showDelete && onDelete && (
-                <button onClick={() => onDelete(material.id)} className="p-1.5 rounded-lg hover:bg-destructive/10 text-muted-foreground hover:text-destructive">
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              )}
+                <Share2 className="w-3.5 h-3.5" />
+                <span>{t("material.share")}</span>
+              </button>
             </div>
-          )}
-        </div>
+
+            {extraDetailsBlock}
+          </div>
+        ) : (
+          /* ================= CLASSIC ORIGINAL CIC CLOUD CARD ================= */
+          <div className={`flex items-start justify-between gap-3 ${dragHandleListeners ? "ps-6" : "ps-1.5"}`}>
+            <div className="flex-1 min-w-0">
+              {badgePills && <div className="mb-2">{badgePills}</div>}
+
+              <div className="flex items-center gap-2">
+                {cloudinaryStreamUrl ? (
+                  <PlayCircle className="w-4 h-4 text-primary shrink-0" />
+                ) : (
+                  <FileText className="w-4 h-4 text-primary shrink-0" />
+                )}
+                <h3 className="font-display font-semibold text-sm sm:text-[15px] text-foreground truncate">
+                  {material.title}
+                </h3>
+              </div>
+
+              {material.created_at && (
+                <p className="text-[11px] text-muted-foreground/75 mt-1 mb-2.5 flex items-center gap-1">
+                  <Clock className="w-2.5 h-2.5" />
+                  <span>{lang === "ar" ? "تاريخ الرفع: " : "Uploaded: "}</span>
+                  <span>{safeFormatDate(material.created_at, "dd MMM yyyy", { locale })}</span>
+                </p>
+              )}
+
+              {streamPreviewBlock}
+
+              <div className="flex flex-wrap items-center gap-2.5 text-xs text-muted-foreground mt-1">
+                {material.is_assignment && !material.deadline && (
+                  <span className="flex items-center gap-1 text-primary font-medium">
+                    <Clock className="w-3 h-3" />
+                    {lang === "ar" ? "مفتوح (بدون موعد نهائي)" : "Open-ended"}
+                  </span>
+                )}
+                {material.deadline && (
+                  <span className={`flex items-center gap-1 ${deadlinePast ? "text-destructive" : ""}`}>
+                    <Clock className="w-3 h-3" />
+                    {safeFormatDate(material.deadline, "dd MMM yyyy - hh:mm a", { locale })}
+                    {deadlinePast && ` (${t("material.expired")})`}
+                  </span>
+                )}
+
+                {openViewerButton}
+
+                {pdfAction && safePdfUrl && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        playClickSfx();
+                        await downloadFileDirectly(pdfAction.downloadUrl, pdfAction.filenameToSave);
+                      }}
+                      className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-primary hover:bg-primary/10 px-2.5 py-1 bg-secondary/70 rounded-full transition-all cursor-pointer"
+                      title={lang === "ar" ? "تحميل على الجهاز" : "Download to Device"}
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>{lang === "ar" ? "تنزيل (للجهاز)" : "Download (Device)"}</span>
+                    </button>
+
+                    {isOfflineCacheableUrl(safePdfUrl) && (
+                      <OfflineMaterialButton url={safePdfUrl} />
+                    )}
+                  </>
+                )}
+
+                {showExternalSection && safeExternalLink && (
+                  <a
+                    href={safeExternalLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      playClickSfx();
+                    }}
+                    className="flex items-center gap-1 text-primary hover:underline cursor-pointer"
+                  >
+                    <ExternalLink className="w-3 h-3" /> {t("material.externalLink")}
+                  </a>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleShareMaterial}
+                  title={t("material.share")}
+                  className="flex items-center gap-1 text-muted-foreground hover:text-primary transition-colors cursor-pointer"
+                >
+                  <Share2 className="w-3 h-3" />
+                  <span>{t("material.share")}</span>
+                </button>
+
+                {(showPdfSection || material.list_content) && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      playClickSfx();
+                      setAiExplainerOpen(true);
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-primary/10 hover:bg-primary/20 text-primary border border-primary/30 font-semibold transition-colors cursor-pointer"
+                    title={
+                      lang === "ar"
+                        ? "شرح وتلخيص المحاضرة بالذكاء الاصطناعي"
+                        : "AI Study & Explainer"
+                    }
+                  >
+                    <Sparkles className="w-3 h-3 text-primary" />
+                    <span>{lang === "ar" ? "شرح وتلخيص AI" : "AI Explain"}</span>
+                  </button>
+                )}
+              </div>
+
+              {extraDetailsBlock}
+            </div>
+
+            {adminControls}
+          </div>
+        )}
       </motion.div>
 
-      {/* Edit Modal */}
+      {/* Admin Edit Modal */}
       <AnimatePresence>
         {editOpen && (
           <motion.div
@@ -558,39 +946,56 @@ const MaterialCard = ({
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
           >
-            <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setEditOpen(false)} />
+            <div
+              className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+              onClick={() => setEditOpen(false)}
+            />
             <motion.div
-              initial={{ scale: 0.9, y: 20 }}
+              initial={{ scale: 0.94, y: 16 }}
               animate={{ scale: 1, y: 0 }}
-              exit={{ scale: 0.9, y: 20 }}
-              className="relative glass-card rounded-2xl p-6 w-full max-w-md shadow-2xl z-10"
+              exit={{ scale: 0.94, y: 16 }}
+              className="relative icloud-pane p-6 w-full max-w-lg max-h-[88vh] overflow-y-auto z-10"
             >
               <div className="flex items-center justify-between mb-5">
-                <h2 className="font-display font-bold text-lg flex items-center gap-2">
-                  <Pencil className="w-5 h-5 text-primary" />
+                <h2 className="font-semibold text-base flex items-center gap-2">
+                  <Pencil className="w-4 h-4 text-primary" />
                   {lang === "ar" ? "تعديل المادة" : "Edit Material"}
                 </h2>
-                <button onClick={() => setEditOpen(false)} className="p-1.5 rounded-lg hover:bg-secondary text-muted-foreground">
+                <button
+                  type="button"
+                  onClick={() => setEditOpen(false)}
+                  className="icloud-icon-btn"
+                >
                   <X className="w-4 h-4" />
                 </button>
               </div>
 
               <div className="space-y-3">
                 <div>
-                  <label className="text-xs text-muted-foreground mb-1 block">{lang === "ar" ? "العنوان" : "Title"}</label>
-                  <Input value={editTitle} onChange={e => setEditTitle(e.target.value)} className="bg-secondary/50" />
+                  <label className="text-xs text-muted-foreground mb-1 block">
+                    {lang === "ar" ? "العنوان" : "Title"}
+                  </label>
+                  <Input
+                    value={editTitle}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                    className="bg-secondary/50"
+                  />
                 </div>
 
                 {courses.length > 0 && (
                   <div>
-                    <label className="text-xs text-muted-foreground mb-1 block">{lang === "ar" ? "المقرر" : "Course"}</label>
+                    <label className="text-xs text-muted-foreground mb-1 block">
+                      {lang === "ar" ? "المقرر" : "Course"}
+                    </label>
                     <select
                       value={editCourseId}
-                      onChange={e => setEditCourseId(e.target.value)}
-                      className="w-full rounded-md bg-secondary/50 border border-input px-3 py-2 text-sm"
+                      onChange={(e) => setEditCourseId(e.target.value)}
+                      className="w-full rounded-lg bg-secondary/50 border border-input px-3 py-2 text-sm"
                     >
-                      {courses.map(c => (
-                        <option key={c.id} value={c.id}>{c.name}</option>
+                      {courses.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
                       ))}
                     </select>
                   </div>
@@ -598,21 +1003,61 @@ const MaterialCard = ({
 
                 {categories.length > 0 && (
                   <div>
-                    <label className="text-xs text-muted-foreground mb-1 block">{lang === "ar" ? "النوع / القسم" : "Category"}</label>
+                    <label className="text-xs text-muted-foreground mb-1 block">
+                      {lang === "ar" ? "النوع / القسم" : "Category"}
+                    </label>
                     <select
                       value={editCategoryId}
-                      onChange={e => setEditCategoryId(e.target.value)}
-                      className="w-full rounded-md bg-secondary/50 border border-input px-3 py-2 text-sm"
+                      onChange={(e) => setEditCategoryId(e.target.value)}
+                      className="w-full rounded-lg bg-secondary/50 border border-input px-3 py-2 text-sm"
                     >
                       <option value="">{lang === "ar" ? "بدون" : "None"}</option>
-                      {categories.map(cat => (
-                        <option key={cat.id} value={cat.id}>{lang === "ar" ? cat.name_ar : cat.name_en}</option>
+                      {categories.map((cat) => (
+                        <option key={cat.id} value={cat.id}>
+                          {lang === "ar" ? cat.name_ar : cat.name_en}
+                        </option>
                       ))}
                     </select>
                   </div>
                 )}
 
-                <div className="flex items-center gap-2 mt-2 mb-2">
+                {/* Cloudinary CDN Stream URL field */}
+                <div className="p-3 rounded-xl bg-indigo-500/[0.06] border border-indigo-500/20 space-y-1.5">
+                  <label className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 flex items-center gap-1.5">
+                    <Radio className="w-3.5 h-3.5" />
+                    {t("admin.cloudinaryUrl")}
+                  </label>
+                  <Input
+                    value={editVideoUrl}
+                    onChange={(e) => setEditVideoUrl(e.target.value)}
+                    placeholder={t("admin.cloudinaryPlaceholder")}
+                    className="bg-background/80 text-xs font-mono"
+                    dir="ltr"
+                  />
+                  {editVideoValidation && (
+                    <div
+                      className={`flex items-center gap-1.5 text-[11px] font-medium ${
+                        editVideoValidation.isValid ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"
+                      }`}
+                    >
+                      {editVideoValidation.isValid ? (
+                        <>
+                          <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                          <span>
+                            {editVideoValidation.streamTypeLabel[lang === "ar" ? "ar" : "en"]}
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                          <span>{editVideoValidation.error}</span>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2 pt-1">
                   <input
                     type="checkbox"
                     id={`editIsList-${material.id}`}
@@ -621,11 +1066,11 @@ const MaterialCard = ({
                     className="accent-primary"
                   />
                   <label htmlFor={`editIsList-${material.id}`} className="text-sm font-medium cursor-pointer">
-                    {lang === "ar" ? "هذه المادة عبارة عن قائمة منسدلة (Playlist)" : "This material is a dropdown list (Playlist)"}
+                    {lang === "ar" ? "هذه المادة عبارة عن قائمة منسدلة (Playlist)" : "Dropdown list (Playlist)"}
                   </label>
                 </div>
 
-                <div className="flex items-center gap-2 mt-1 mb-2">
+                <div className="flex items-center gap-2">
                   <input
                     type="checkbox"
                     id={`editIsReference-${material.id}`}
@@ -634,7 +1079,7 @@ const MaterialCard = ({
                     className="accent-amber-500"
                   />
                   <label htmlFor={`editIsReference-${material.id}`} className="text-sm font-medium cursor-pointer">
-                    {lang === "ar" ? "هذه المادة تعتبر (مرجع) Course Reference" : "This material is a Course Reference"}
+                    {lang === "ar" ? "هذه المادة تعتبر مرجع (Course Reference)" : "Course Reference"}
                   </label>
                 </div>
 
@@ -645,75 +1090,109 @@ const MaterialCard = ({
                     </label>
                     <textarea
                       value={editListContent}
-                      onChange={e => setEditListContent(e.target.value)}
-                      className="w-full bg-secondary/50 rounded-md border border-input px-3 py-2 text-sm min-h-[150px]"
+                      onChange={(e) => setEditListContent(e.target.value)}
+                      className="w-full bg-secondary/50 rounded-lg border border-input px-3 py-2 text-sm min-h-[140px]"
                     />
                   </div>
                 ) : (
                   <>
-
-                <div>
-                  <label className="text-xs text-muted-foreground mb-1 block">{lang === "ar" ? "اسم عرض الـ PDF" : "PDF Display Name"}</label>
-                  <Input value={editPdfDisplayName} onChange={e => setEditPdfDisplayName(e.target.value)} className="bg-secondary/50" />
-                </div>
-
-                <div>
-                  <label className="text-xs text-muted-foreground mb-1 block">{lang === "ar" ? "رابط خارجي" : "External Link"}</label>
-                  <Input value={editExternalLink} onChange={e => setEditExternalLink(e.target.value)} className="bg-secondary/50" placeholder="https://..." />
-                </div>
-
-                <div>
-                  <label className="text-xs text-muted-foreground mb-1 block">
-                    {lang === "ar" ? "تحديد السكشن (اختياري)" : "Assign to Section (optional)"}
-                  </label>
-                  <select
-                    value={editSectionNumber}
-                    onChange={e => setEditSectionNumber(e.target.value)}
-                    className="w-full rounded-md bg-secondary/50 border border-input px-3 py-2 text-xs"
-                  >
-                    <option value="all">{lang === "ar" ? "عام (جميع السكاشن)" : "All Sections"}</option>
-                    {Array.from({ length: 18 }, (_, idx) => String(idx + 1)).map(num => (
-                      <option key={num} value={num}>
-                        {lang === "ar" ? `سكشن ${num}` : `Section ${num}`}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="text-xs text-muted-foreground mb-1 block">
-                    {lang === "ar" ? "ملحوظات على المادة / التكليف (تظهر بخلفية هادئة)" : "Material Notes (displays with tinted background)"}
-                  </label>
-                  <textarea
-                    value={editNotes}
-                    onChange={e => setEditNotes(e.target.value)}
-                    className="w-full bg-secondary/50 rounded-md border border-input px-3 py-2 text-xs min-h-[50px]"
-                    placeholder={lang === "ar" ? "اكتب أي ملحوظات أو تنبيهات هنا..." : "Write any notes here..."}
-                  />
-                </div>
-
-                {material.is_assignment && (
-                  <>
                     <div>
-                      <label className="text-xs text-muted-foreground mb-1 block">🔗 {lang === "ar" ? "رابط التسليم" : "Submission Link"}</label>
-                      <Input value={editSubmissionLink} onChange={e => setEditSubmissionLink(e.target.value)} className="bg-secondary/50" placeholder="https://forms.google.com/..." />
+                      <label className="text-xs text-muted-foreground mb-1 block">
+                        {lang === "ar" ? "اسم عرض الملف" : "Display Name"}
+                      </label>
+                      <Input
+                        value={editPdfDisplayName}
+                        onChange={(e) => setEditPdfDisplayName(e.target.value)}
+                        className="bg-secondary/50"
+                      />
                     </div>
+
                     <div>
-                      <label className="text-xs text-muted-foreground mb-1 block">{lang === "ar" ? "الموعد النهائي" : "Deadline"}</label>
-                      <Input type="datetime-local" value={editDeadline} onChange={e => setEditDeadline(e.target.value)} className="bg-secondary/50" />
+                      <label className="text-xs text-muted-foreground mb-1 block">
+                        {lang === "ar" ? "رابط خارجي" : "External Link"}
+                      </label>
+                      <Input
+                        value={editExternalLink}
+                        onChange={(e) => setEditExternalLink(e.target.value)}
+                        className="bg-secondary/50"
+                        placeholder="https://..."
+                        dir="ltr"
+                      />
                     </div>
-                  </>
-                )}
+
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">
+                        {lang === "ar" ? "تحديد السكشن (اختياري)" : "Assign to Section (optional)"}
+                      </label>
+                      <select
+                        value={editSectionNumber}
+                        onChange={(e) => setEditSectionNumber(e.target.value)}
+                        className="w-full rounded-lg bg-secondary/50 border border-input px-3 py-2 text-xs"
+                      >
+                        <option value="all">{lang === "ar" ? "عام (جميع السكاشن)" : "All Sections"}</option>
+                        {Array.from({ length: 18 }, (_, idx) => String(idx + 1)).map((num) => (
+                          <option key={num} value={num}>
+                            {lang === "ar" ? `سكشن ${num}` : `Section ${num}`}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">
+                        {lang === "ar" ? "ملحوظات على المادة / التكليف" : "Material Notes"}
+                      </label>
+                      <textarea
+                        value={editNotes}
+                        onChange={(e) => setEditNotes(e.target.value)}
+                        className="w-full bg-secondary/50 rounded-lg border border-input px-3 py-2 text-xs min-h-[60px]"
+                        placeholder={lang === "ar" ? "اكتب أي ملحوظات أو تنبيهات هنا..." : "Write any notes..."}
+                      />
+                    </div>
+
+                    {material.is_assignment && (
+                      <>
+                        <div>
+                          <label className="text-xs text-muted-foreground mb-1 block">
+                            {lang === "ar" ? "رابط التسليم" : "Submission Link"}
+                          </label>
+                          <Input
+                            value={editSubmissionLink}
+                            onChange={(e) => setEditSubmissionLink(e.target.value)}
+                            className="bg-secondary/50"
+                            placeholder="https://forms.google.com/..."
+                            dir="ltr"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs text-muted-foreground mb-1 block">
+                            {lang === "ar" ? "الموعد النهائي" : "Deadline"}
+                          </label>
+                          <Input
+                            type="datetime-local"
+                            value={editDeadline}
+                            onChange={(e) => setEditDeadline(e.target.value)}
+                            className="bg-secondary/50"
+                          />
+                        </div>
+                      </>
+                    )}
                   </>
                 )}
               </div>
 
               <div className="flex gap-2 mt-5">
-                <Button onClick={handleSave} disabled={saving} className="flex-1 gap-2">
+                <Button onClick={handleSave} disabled={saving} className="flex-1 gap-2 rounded-full icloud-btn-primary border-0">
                   <Save className="w-4 h-4" />
-                  {saving ? (lang === "ar" ? "جاري الحفظ..." : "Saving...") : (lang === "ar" ? "حفظ التعديلات" : "Save Changes")}
+                  {saving
+                    ? lang === "ar"
+                      ? "جاري الحفظ..."
+                      : "Saving..."
+                    : lang === "ar"
+                      ? "حفظ التعديلات"
+                      : "Save Changes"}
                 </Button>
-                <Button variant="outline" onClick={() => setEditOpen(false)} className="w-24">
+                <Button variant="outline" onClick={() => setEditOpen(false)} className="w-24 rounded-full">
                   {lang === "ar" ? "إلغاء" : "Cancel"}
                 </Button>
               </div>
@@ -722,47 +1201,45 @@ const MaterialCard = ({
         )}
       </AnimatePresence>
 
-      {/* PDF Viewer Modal */}
-      {material.pdf_url && (
+      {/* Lazy Modals — Mounted ONLY when actually open */}
+      {pdfViewerOpen && safePdfUrl && (
         <Suspense fallback={null}>
           <PdfViewerModal
             open={pdfViewerOpen}
             onOpenChange={setPdfViewerOpen}
-            pdfUrl={material.pdf_url}
+            pdfUrl={safePdfUrl}
             title={material.title}
             displayName={material.pdf_display_name || undefined}
             materialId={material.id}
             course={courses.find((c) => c.id === material.course_id)}
           />
-          <VideoViewerModal
-            open={videoViewerOpen}
-            onOpenChange={setVideoViewerOpen}
-            videoUrl={material.pdf_url}
-            title={material.title}
-            displayName={material.pdf_display_name || undefined}
-          />
-          {aiExplainerOpen && (
-            <AiLectureExplainerModal
-              open={aiExplainerOpen}
-              onOpenChange={setAiExplainerOpen}
-              material={material}
-              course={courses.find((c) => c.id === material.course_id)}
-            />
-          )}
         </Suspense>
       )}
 
-      {/* External Link Modal (Commented out for future use) */}
-      {/* activeLinkUrl && (
+      {videoViewerUrl && (
         <Suspense fallback={null}>
-          <ExternalLinkModal
-            open={!!activeLinkUrl}
-            onOpenChange={(open) => !open && setActiveLinkUrl(null)}
-            url={activeLinkUrl}
+          <VideoViewerModal
+            open={Boolean(videoViewerUrl)}
+            onOpenChange={(open) => {
+              if (!open) setVideoViewerUrl(null);
+            }}
+            videoUrl={videoViewerUrl}
             title={material.title}
+            displayName={material.pdf_display_name || undefined}
           />
         </Suspense>
-      ) */}
+      )}
+
+      {aiExplainerOpen && (
+        <Suspense fallback={null}>
+          <AiLectureExplainerModal
+            open={aiExplainerOpen}
+            onOpenChange={setAiExplainerOpen}
+            material={material}
+            course={courses.find((c) => c.id === material.course_id)}
+          />
+        </Suspense>
+      )}
     </>
   );
 };

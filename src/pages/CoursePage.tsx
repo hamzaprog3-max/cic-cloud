@@ -44,7 +44,8 @@ const CoursePage = () => {
 
   const activeCategoryBySlug = categories.find(c => slugify(c.name_en) === categorySlug || slugify(c.name_ar) === categorySlug);
   const activeCategoryIdRaw = activeCategoryBySlug?.id || searchParams.get("category") || null;
-  const activeCategory = activeCategoryIdRaw || categories[0]?.id || "";
+  const defaultCategory = categories.find(c => allMaterials.some(m => !m.archived && m.category_id === c.id))?.id || categories[0]?.id || "";
+  const activeCategory = activeCategoryIdRaw || defaultCategory;
 
   // Wrapper that keeps the URL in sync with the active tab
   const setActiveCategoryId = (catId: string) => {
@@ -348,17 +349,27 @@ const CoursePage = () => {
         {/* Dynamic tabs from DB + Share button */}
         <div className="flex items-center gap-2 mb-8">
           <div className="flex gap-1 flex-1 bg-secondary/50 rounded-xl p-1 overflow-x-auto">
-            {categories.map(cat => (
-              <button
-                key={cat.id}
-                onClick={() => { playClickSfx(); setActiveCategoryId(cat.id); }}
-                className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg text-sm font-medium transition-all whitespace-nowrap ${
-                  activeCategory === cat.id ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                {lang === "ar" ? cat.name_ar : cat.name_en}
-              </button>
-            ))}
+            {categories.map(cat => {
+              const count = allMaterials.filter(m => !m.archived && m.category_id === cat.id).length;
+              return (
+                <button
+                  key={cat.id}
+                  onClick={() => { playClickSfx(); setActiveCategoryId(cat.id); }}
+                  className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg text-sm font-medium transition-all whitespace-nowrap ${
+                    activeCategory === cat.id ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  <span>{lang === "ar" ? cat.name_ar : cat.name_en}</span>
+                  {count > 0 && (
+                    <span className={`text-[11px] px-1.5 py-0.5 rounded-full font-mono font-medium ${
+                      activeCategory === cat.id ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"
+                    }`}>
+                      {count}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           </div>
           <button
             onClick={handleShareCategory}

@@ -385,23 +385,26 @@ export const db = {
 
   // Materials
   getMaterials: async (courseId?: string): Promise<Material[]> => {
-    try {
-      let query = supabase.from("materials").select("*")
-        .is("deleted_at", null)
-        .order("sort_order", { ascending: true, nullsFirst: true })
-        .order("created_at", { ascending: false });
-      if (courseId) query = query.eq("course_id", courseId);
-      const { data, error } = await query;
-      if (!error && data && data.length > 0) {
-        const fallbackTarget = courseId ? fallbackMaterials.filter(m => m.course_id === courseId) : fallbackMaterials;
-        if (data.length < fallbackTarget.length) {
-          const dbMatIds = new Set(data.map((m: any) => m.id));
-          const missing = fallbackTarget.filter(m => !dbMatIds.has(m.id));
-          return [...data, ...missing] as Material[];
+    const isUuid = !courseId || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(courseId);
+    if (isUuid) {
+      try {
+        let query = supabase.from("materials").select("*")
+          .is("deleted_at", null)
+          .order("sort_order", { ascending: true, nullsFirst: true })
+          .order("created_at", { ascending: false });
+        if (courseId) query = query.eq("course_id", courseId);
+        const { data, error } = await query;
+        if (!error && data && data.length > 0) {
+          const fallbackTarget = courseId ? fallbackMaterials.filter(m => m.course_id === courseId) : fallbackMaterials;
+          if (data.length < fallbackTarget.length) {
+            const dbMatIds = new Set(data.map((m: any) => m.id));
+            const missing = fallbackTarget.filter(m => !dbMatIds.has(m.id));
+            return [...data, ...missing] as Material[];
+          }
+          return data as Material[];
         }
-        return data as Material[];
-      }
-    } catch {}
+      } catch {}
+    }
     return courseId ? fallbackMaterials.filter(m => m.course_id === courseId) : fallbackMaterials;
   },
   getMaterialsByDepartment: async (departmentId: string): Promise<Material[]> => {
