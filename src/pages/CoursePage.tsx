@@ -8,6 +8,7 @@ import { useI18n } from "@/lib/i18n";
 import { useQuery } from "@tanstack/react-query";
 import MaterialCard from "@/components/MaterialCard";
 import { BulkOfflineDownloadButton } from "@/components/BulkOfflineDownloadButton";
+import { DhikrTopPill } from "@/components/DhikrBanner";
 import { ArrowRight, ArrowLeft, FolderDown, Share2 } from "lucide-react";
 import { toast } from "sonner";
 import { playBackSfx, playClickSfx } from "@/hooks/use-sfx";
@@ -310,14 +311,21 @@ const CoursePage = () => {
         </motion.div>
 
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="mb-8">
-          <div
-            className="inline-block px-3 py-1 rounded-lg text-xs font-semibold mb-2"
-            style={{ background: `hsl(${course.color} / 0.15)`, color: `hsl(${course.color})` }}
-          >
-            {course.code}
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div
+                className="inline-block px-3 py-1 rounded-lg text-xs font-semibold mb-2"
+                style={{ background: `hsl(${course.color} / 0.15)`, color: `hsl(${course.color})` }}
+              >
+                {course.code}
+              </div>
+              <h1 className="text-3xl font-display font-bold">{course.name}</h1>
+              <p className="text-muted-foreground mt-1">{course.description}</p>
+            </div>
+            <div className="shrink-0 pt-1">
+              <DhikrTopPill />
+            </div>
           </div>
-          <h1 className="text-3xl font-display font-bold">{course.name}</h1>
-          <p className="text-muted-foreground mt-1">{course.description}</p>
           
           <div className="mt-4 flex flex-wrap gap-2">
             <BulkOfflineDownloadButton 

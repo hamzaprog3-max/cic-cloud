@@ -5,6 +5,7 @@ import { useI18n } from "@/lib/i18n";
 import { ArrowLeft, ArrowRight } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { BulkOfflineDownloadButton } from "@/components/BulkOfflineDownloadButton";
+import { DhikrTopPill } from "@/components/DhikrBanner";
 import { playBackSfx, playClickSfx } from "@/hooks/use-sfx";
 import { useEffect } from "react";
 import { setPushAudience, syncPushPreferences } from "@/lib/push-registration";
@@ -93,16 +94,19 @@ const YearCoursesPage = () => {
   return (
     <div className="min-h-screen pt-24 pb-12 px-4">
       <div className="container mx-auto max-w-5xl">
-        <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}>
+        <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="flex items-center justify-between gap-3 mb-6">
           {deptId ? (
-            <Link to={`/year/${yearId}/semesters?dept=${deptId}`} onClick={playBackSfx} className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground mb-6 transition-colors">
+            <Link to={`/year/${yearId}/semesters?dept=${deptId}`} onClick={playBackSfx} className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors">
               <BackArrow className="w-4 h-4" /> {lang === "ar" ? "العودة للفصول" : "Back to Semesters"}
             </Link>
           ) : (
-            <Link to={`/year/${yearId}/semesters`} onClick={playBackSfx} className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground mb-6 transition-colors">
+            <Link to={`/year/${yearId}/semesters`} onClick={playBackSfx} className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors">
               <BackArrow className="w-4 h-4" /> {lang === "ar" ? "العودة للفصول" : "Back to Semesters"}
             </Link>
           )}
+          <div className="sm:hidden">
+            <DhikrTopPill />
+          </div>
         </motion.div>
 
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="text-center mb-12">
