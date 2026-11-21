@@ -79,7 +79,12 @@ const CoursePage = () => {
     .sort((a, b) => {
       if (a.is_reference && !b.is_reference) return -1;
       if (!a.is_reference && b.is_reference) return 1;
-      return 0;
+      if (a.sort_order !== null && a.sort_order !== undefined && b.sort_order !== null && b.sort_order !== undefined && a.sort_order !== b.sort_order) {
+        return a.sort_order - b.sort_order;
+      }
+      const timeA = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const timeB = b.created_at ? new Date(b.created_at).getTime() : 0;
+      return timeB - timeA;
     });
 
   const activeCategoryObj = categories.find(c => c.id === activeCategory);
