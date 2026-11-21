@@ -355,9 +355,7 @@ const CoursePage = () => {
         {/* Dynamic tabs from DB + Share button */}
         <div className="flex items-center gap-2 mb-8">
           <div className="flex gap-1 flex-1 bg-secondary/50 rounded-xl p-1 overflow-x-auto">
-            {categories.map(cat => {
-              const count = allMaterials.filter(m => !m.archived && m.category_id === cat.id).length;
-              return (
+            {categories.map(cat => (
                 <button
                   key={cat.id}
                   onClick={() => { playClickSfx(); setActiveCategoryId(cat.id); }}
@@ -366,16 +364,8 @@ const CoursePage = () => {
                   }`}
                 >
                   <span>{lang === "ar" ? cat.name_ar : cat.name_en}</span>
-                  {count > 0 && (
-                    <span className={`text-[11px] px-1.5 py-0.5 rounded-full font-mono font-medium ${
-                      activeCategory === cat.id ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"
-                    }`}>
-                      {count}
-                    </span>
-                  )}
                 </button>
-              );
-            })}
+              ))}
           </div>
           <button
             onClick={handleShareCategory}
