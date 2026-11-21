@@ -577,17 +577,14 @@ const SchedulePage = () => {
         </motion.div>
 
         <>
-            {/* Department Toggle - Hidden for CS-only context */}
-            {!isCSOnly && (
+          {/* Department and Semester Toggle - Always available for easy switching between CS, Cyber, and AI */}
           <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.05 }}
             className="glass-card rounded-2xl p-4 mb-6">
             <p className="text-sm font-medium text-muted-foreground mb-3">{t("schedule.selectDept")}</p>
             <div className="flex gap-2 flex-wrap">
-              {!isAICyber && (
-                <Button variant={selectedDept === "cs" ? "default" : "outline"} size="sm" onClick={() => handleDeptChange("cs")} className="gap-2">
-                  <Monitor className="w-4 h-4" /> {t("schedule.csDept")}
-                </Button>
-              )}
+              <Button variant={selectedDept === "cs" ? "default" : "outline"} size="sm" onClick={() => handleDeptChange("cs")} className="gap-2">
+                <Monitor className="w-4 h-4" /> {t("schedule.csDept")}
+              </Button>
               <Button variant={selectedDept === "cyber" ? "default" : "outline"} size="sm" onClick={() => handleDeptChange("cyber")} className="gap-2">
                 <Shield className="w-4 h-4" /> {t("schedule.cyberDept")}
               </Button>
@@ -608,7 +605,6 @@ const SchedulePage = () => {
               </div>
             </div>
           </motion.div>
-        )}
 
         {!hasData ? (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="glass-card rounded-2xl p-12 text-center">
