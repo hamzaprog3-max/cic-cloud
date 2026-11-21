@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import MaterialCard from "@/components/MaterialCard";
-import { LogOut, Plus, Bell, Link2, Upload, Trash2, BookPlus, Users, Layers, FolderUp, Sparkles } from "lucide-react";
+import { LogOut, Plus, Bell, Link2, Upload, Trash2, BookPlus, Users, Layers, FolderUp, Sparkles, KeyRound } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import ManageModerators from "@/components/admin/ManageModerators";
@@ -93,6 +93,34 @@ const AdminDashboard = () => {
   const [yearFilter, setYearFilter] = useState<string>("all");
   const [semesterFilter, setSemesterFilter] = useState<string>("all");
   const [showAiKeyDialog, setShowAiKeyDialog] = useState(false);
+  const [showOwnerPwdDialog, setShowOwnerPwdDialog] = useState(false);
+  const [newOwnerPassword, setNewOwnerPassword] = useState("");
+  const [confirmOwnerPassword, setConfirmOwnerPassword] = useState("");
+  const [savingOwnerPwd, setSavingOwnerPwd] = useState(false);
+
+  const handleChangeOwnerPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newOwnerPassword.length < 6) {
+      toast.error(lang === "ar" ? "كلمة المرور يجب أن تكون 6 أحرف على الأقل" : "Password must be at least 6 characters");
+      return;
+    }
+    if (newOwnerPassword !== confirmOwnerPassword) {
+      toast.error(lang === "ar" ? "كلمتا المرور غير متطابقتين" : "Passwords do not match");
+      return;
+    }
+    setSavingOwnerPwd(true);
+    try {
+      await auth.changeOwnerPassword(newOwnerPassword, "HamzaCA");
+      toast.success(lang === "ar" ? "تم تغيير كلمة مرور حساب HamzaCA بنجاح ✅" : "Owner password updated ✅");
+      setShowOwnerPwdDialog(false);
+      setNewOwnerPassword("");
+      setConfirmOwnerPassword("");
+    } catch (err: any) {
+      toast.error(err?.message || (lang === "ar" ? "فشل تغيير كلمة المرور" : "Failed to update password"));
+    } finally {
+      setSavingOwnerPwd(false);
+    }
+  };
 
   const loadData = useCallback(async () => {
     const deptId = user.role === "moderator" ? user.departmentId : undefined;
@@ -700,17 +728,28 @@ const AdminDashboard = () => {
                 : `${t("admin.moderator")} (${user.academicYear === "2" ? (lang === "ar" ? "الصف الثاني" : "2nd Year") : user.academicYear === "3" ? (lang === "ar" ? "الصف الثالث" : "3rd Year") : user.academicYear === "4" ? (lang === "ar" ? "الصف الرابع" : "4th Year") : (lang === "ar" ? "الصف الأول" : "1st Year")}${departments.find(d => d.id === user.departmentId) ? ` - ${lang === "ar" ? departments.find(d => d.id === user.departmentId)?.name_ar : departments.find(d => d.id === user.departmentId)?.name_en}` : ""}) — ${user.permissions?.length || 0} ${t("admin.permissions")}`}
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             {isOwner && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setShowAiKeyDialog(true)}
-                className="gap-1.5 text-xs bg-secondary/50 hover:bg-secondary border-border/60 font-semibold"
-              >
-                <Sparkles className="w-3.5 h-3.5 text-primary" />
-                {lang === "ar" ? "إعدادات AI" : "AI Settings"}
-              </Button>
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowOwnerPwdDialog(true)}
+                  className="gap-1.5 text-xs bg-secondary/50 hover:bg-secondary border-border/60 font-semibold"
+                >
+                  <KeyRound className="w-3.5 h-3.5 text-primary" />
+                  {lang === "ar" ? "باسورد HamzaCA" : "Owner Password"}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowAiKeyDialog(true)}
+                  className="gap-1.5 text-xs bg-secondary/50 hover:bg-secondary border-border/60 font-semibold"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-primary" />
+                  {lang === "ar" ? "إعدادات AI" : "AI Settings"}
+                </Button>
+              </>
             )}
             <Button variant="ghost" size="sm" onClick={handleLogout}><LogOut className="w-4 h-4 me-1" /> {t("admin.logout")}</Button>
           </div>
@@ -1184,6 +1223,39 @@ const AdminDashboard = () => {
           onOpenChange={setShowAiKeyDialog}
         />
       )}
+
+      {/* Owner Password Change Dialog */}
+      <Dialog open={showOwnerPwdDialog} onOpenChange={setShowOwnerPwdDialog}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <KeyRound className="w-5 h-5 text-primary" />
+              {lang === "ar" ? "تغيير كلمة مرور حساب المالك (HamzaCA)" : "Change Owner Password (HamzaCA)"}
+            </DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleChangeOwnerPassword} className="space-y-3 mt-2">
+            <Input
+              type="password"
+              placeholder={lang === "ar" ? "كلمة المرور الجديدة (6 أحرف على الأقل)" : "New password (min 6 chars)"}
+              value={newOwnerPassword}
+              onChange={(e) => setNewOwnerPassword(e.target.value)}
+              className="bg-secondary/50"
+            />
+            <Input
+              type="password"
+              placeholder={lang === "ar" ? "تأكيد كلمة المرور الجديدة" : "Confirm new password"}
+              value={confirmOwnerPassword}
+              onChange={(e) => setConfirmOwnerPassword(e.target.value)}
+              className="bg-secondary/50"
+            />
+            <Button type="submit" className="w-full" disabled={savingOwnerPwd}>
+              {savingOwnerPwd
+                ? (lang === "ar" ? "جاري الحفظ..." : "Saving...")
+                : (lang === "ar" ? "حفظ كلمة المرور الجديدة" : "Save New Password")}
+            </Button>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

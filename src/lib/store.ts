@@ -322,6 +322,12 @@ export const auth = {
     localStorage.removeItem("lms_mod_dept");
     localStorage.removeItem("lms_mod_year");
   },
+  changeOwnerPassword: async (newPassword: string, username = "HamzaCA") => {
+    return await apiMutate<{ ok: boolean; username: string }>("/api/auth/change-owner-password", "POST", {
+      newPassword,
+      username,
+    });
+  },
 };
 
 // ============ DATA API (Live Cloudflare D1 + R2) ============

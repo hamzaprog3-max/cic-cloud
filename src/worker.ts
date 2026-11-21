@@ -476,9 +476,22 @@ async function handleAuthLogin(request: Request, env: Env): Promise<Response> {
   }
 
   const cleanUser = rawUser.toLowerCase();
-  const cleanPass = rawPass.trim();
 
-  // 1. Check D1 moderators table first (if password is already hashed in D1 with salted SHA-256)
+  // 1. Check D1 owners table first (e.g. HamzaCA)
+  try {
+    const ownerRow = await env.DB.prepare("SELECT * FROM owners WHERE lower(username) = ?")
+      .bind(cleanUser)
+      .first<Record<string, any>>();
+    if (ownerRow && (await verifyPasswordHash(rawPass, String(ownerRow.password_hash || "")))) {
+      const displayName = String(ownerRow.display_name || "المالك");
+      const token = await createToken({ role: "owner", displayName }, env);
+      return jsonResponse({ role: "owner", displayName, username: ownerRow.username, token }, 200, request);
+    }
+  } catch (err) {
+    console.warn("D1 owner lookup failed:", err);
+  }
+
+  // 2. Check D1 moderators table (if password is already hashed in D1 with salted SHA-256)
   let existingD1Mod: Record<string, any> | null = null;
   try {
     existingD1Mod = await env.DB.prepare("SELECT * FROM moderators WHERE lower(username) = ?")
@@ -627,22 +640,46 @@ async function handleAuthLogin(request: Request, env: Env): Promise<Response> {
     console.warn("Legacy Supabase auth check failed:", err);
   }
 
-  // 3. Fallback: check env owner credentials or emergency master owner credentials
+  // 3. Fallback: check Cloudflare Worker secret env owner credentials (if configured)
   const envOwnerMatch =
     env.OWNER_USERNAME &&
     env.OWNER_PASSWORD &&
     cleanUser === env.OWNER_USERNAME.trim().toLowerCase() &&
     rawPass === env.OWNER_PASSWORD;
 
-  const isMasterUser = ["owner", "hamza", "admin", "hamza6454645@gmail.com", "cic", "superadmin"].includes(cleanUser);
-  const isMasterPass = ["cic2026", "admin2026", "hamza2026", "admin", "hamza", "owner", "123456", "cic"].includes(cleanPass);
-
-  if (envOwnerMatch || (isMasterUser && isMasterPass)) {
+  if (envOwnerMatch) {
     const token = await createToken({ role: "owner", displayName: "المالك" }, env);
     return jsonResponse({ role: "owner", displayName: "المالك", token }, 200, request);
   }
 
   return jsonResponse({ error: "اسم المستخدم أو كلمة المرور غير صحيحة" }, 401, request);
+}
+
+async function handleChangeOwnerPassword(request: Request, env: Env): Promise<Response> {
+  const claims = await verifyToken(request, env);
+  if (!claims || claims.role !== "owner") {
+    return jsonResponse({ error: "صلاحية المالك مطلوبة" }, 403, request);
+  }
+  const body = (await request.json().catch(() => null)) as { newPassword?: string; username?: string } | null;
+  const newPassword = body?.newPassword || "";
+  if (newPassword.length < 6) {
+    return jsonResponse({ error: "كلمة المرور يجب أن تكون 6 أحرف على الأقل" }, 400, request);
+  }
+  const pwHash = await hashPassword(newPassword);
+  const targetUser = body?.username?.trim() || "HamzaCA";
+  const existing = await env.DB.prepare("SELECT id FROM owners WHERE lower(username) = ?")
+    .bind(targetUser.toLowerCase())
+    .first<{ id: string }>();
+  if (existing) {
+    await env.DB.prepare("UPDATE owners SET password_hash = ? WHERE id = ?").bind(pwHash, existing.id).run();
+  } else {
+    await env.DB.prepare(
+      "INSERT INTO owners (id, username, password_hash, display_name, created_at) VALUES (?, ?, ?, ?, ?)"
+    )
+      .bind(crypto.randomUUID(), targetUser, pwHash, "Hamza (المالك)", new Date().toISOString())
+      .run();
+  }
+  return jsonResponse({ ok: true, username: targetUser }, 200, request);
 }
 
 // ============ R2 HANDLERS ============
@@ -1586,6 +1623,9 @@ export default {
       const claims = await verifyToken(request, env);
       if (!claims) return jsonResponse({ valid: false }, 401, request);
       return jsonResponse({ valid: true, user: claims }, 200, request);
+    }
+    if (url.pathname === "/api/auth/change-owner-password" && request.method === "POST") {
+      return handleChangeOwnerPassword(request, env);
     }
 
     // Live D1 Database endpoints

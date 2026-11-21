@@ -101,6 +101,14 @@ CREATE TABLE IF NOT EXISTS notification_templates (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS owners (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  display_name TEXT NOT NULL DEFAULT 'المالك',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS moderators (
   id TEXT PRIMARY KEY,
   username TEXT NOT NULL UNIQUE,
