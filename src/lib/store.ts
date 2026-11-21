@@ -334,17 +334,25 @@ export const db = {
   getCourses: async (): Promise<Course[]> => {
     try {
       const { data, error } = await supabase.from("courses").select("*").order("created_at");
-      if (!error && data && data.length > 0) return data as Course[];
+      if (!error && data && data.length > 0) {
+        const dbCourseIds = new Set(data.map(c => c.id));
+        const missingFromDb = fallbackCourses.filter(c => !dbCourseIds.has(c.id));
+        return [...data, ...missingFromDb] as Course[];
+      }
     } catch {}
     return fallbackCourses;
   },
   getCoursesByDepartment: async (departmentId: string): Promise<Course[]> => {
-    const targetId = departmentId === "cs-dept-id" ? "9eaab1c7-37e2-44a4-afbe-738586d50835" : departmentId;
+    const targetId = departmentId === "cs-dept-id" ? "9eaab1c7-37e2-44a4-afbe-738586d50835" : (departmentId === "ai-cyber-dept-id" ? "ca4069a4-fc50-4e96-8fb7-c1f4ea67da4f" : departmentId);
     try {
       const { data, error } = await supabase.from("courses").select("*").eq("department_id", targetId).order("created_at");
-      if (!error && data && data.length > 0) return data as Course[];
+      if (!error && data && data.length > 0) {
+        const dbCourseIds = new Set(data.map(c => c.id));
+        const missingFromDb = fallbackCourses.filter(c => c.department_id === targetId && !dbCourseIds.has(c.id));
+        return [...data, ...missingFromDb] as Course[];
+      }
     } catch {}
-    return fallbackCourses.filter(c => !targetId || c.department_id === targetId || !c.department_id);
+    return fallbackCourses.filter(c => !targetId || c.department_id === targetId);
   },
   addCourse: async (course: { name: string; code: string; description: string; description_ar?: string; department_id?: string | null; academic_year: string; semester: string; notes?: string | null }) => {
     const { data: existing } = await supabase.from("courses").select("id");
@@ -384,7 +392,15 @@ export const db = {
         .order("created_at", { ascending: false });
       if (courseId) query = query.eq("course_id", courseId);
       const { data, error } = await query;
-      if (!error && data && data.length > 0) return data as Material[];
+      if (!error && data && data.length > 0) {
+        const fallbackTarget = courseId ? fallbackMaterials.filter(m => m.course_id === courseId) : fallbackMaterials;
+        if (data.length < fallbackTarget.length) {
+          const dbMatIds = new Set(data.map((m: any) => m.id));
+          const missing = fallbackTarget.filter(m => !dbMatIds.has(m.id));
+          return [...data, ...missing] as Material[];
+        }
+        return data as Material[];
+      }
     } catch {}
     return courseId ? fallbackMaterials.filter(m => m.course_id === courseId) : fallbackMaterials;
   },

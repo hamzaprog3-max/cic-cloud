@@ -46,82 +46,23 @@ const YearCoursesPage = () => {
     initialData: fallbackDepartments,
   });
 
-  const targetDeptId = deptId === "cs-dept-id" ? "9eaab1c7-37e2-44a4-afbe-738586d50835" : deptId;
+  const targetDeptId = deptId === "cs-dept-id" ? "9eaab1c7-37e2-44a4-afbe-738586d50835" : (deptId === "ai-cyber-dept-id" ? "ca4069a4-fc50-4e96-8fb7-c1f4ea67da4f" : deptId);
 
-  const { data: deptCourses = [] } = useQuery({
-    queryKey: ["courses", "department", targetDeptId],
-    queryFn: () => db.getCoursesByDepartment(targetDeptId!),
-    initialData: () => fallbackCourses.filter(c => !targetDeptId || c.department_id === targetDeptId || !c.department_id),
-    enabled: !!targetDeptId,
-  });
-
-  // Get shared course IDs for this department
-  const { data: sharedCourseIds = [] } = useQuery({
-    queryKey: ["shared-dept-courses", targetDeptId],
-    queryFn: () => db.getSharedCoursesForDept(targetDeptId!),
-    enabled: !!targetDeptId && targetDeptId !== "cs-dept-id",
-  });
-
-  // Get the actual shared courses (or all courses if no deptId)
-  // Always loaded: also needed to build unique links for same-named courses in different departments
   const { data: allCourses = [] } = useQuery({
     queryKey: ["courses", "all"],
     queryFn: db.getCourses,
     initialData: fallbackCourses,
   });
 
-  const sharedCourses = allCourses.filter(c => sharedCourseIds.includes(c.id));
-  
-  // Discrete Math course to show in Cyber Year 1 Semester 1 instead of Physics
-  const discreteMathCourse = allCourses.find(c => 
-    c.name.includes("الرياضيات غير المتصلة") || 
-    c.name.toLowerCase().includes("discrete") || 
-    c.code === "CS3"
-  );
+  const baseCourses = targetDeptId
+    ? allCourses.filter(c => c.department_id === targetDeptId)
+    : allCourses;
 
-  let courses: Course[] = [];
-  if (yearId === "1") {
-    const isCyberDept = targetDeptId === "ca4069a4-fc50-4e96-8fb7-c1f4ea67da4f";
-    if (semesterId === "1") {
-      if (isCyberDept) {
-        // Cyber Year 1 Sem 1: foundational computing courses WITHOUT Physics, with Discrete Math
-        const base = allCourses.filter(c => 
-          (c.academic_year || "1") === "1" && 
-          (c.semester || "1") === "1" && 
-          !c.name.toLowerCase().includes("physics") && 
-          c.code !== "BS 121"
-        );
-        courses = discreteMathCourse ? [...base, discreteMathCourse] : base;
-      } else {
-        // CS Year 1 Sem 1: standard 6 courses (includes Physics)
-        courses = allCourses.filter(c => 
-          (c.academic_year || "1") === "1" && 
-          (c.semester || "1") === "1"
-        );
-      }
-    } else {
-      // Semester 2: strictly department-specific
-      courses = deptCourses.filter(c => 
-        (c.academic_year || "1") === "1" && 
-        (c.semester || "2") === "2"
-      );
-    }
-  } else if (yearId === "2" && semesterId === "1") {
-    // Year 2 Semester 1: core computing courses shared across computing departments
-    courses = allCourses.filter(c => 
-      (c.academic_year || "2") === "2" && 
-      (c.semester || "1") === "1" && 
-      c.code !== "BACHELOR-PROG"
-    );
-  } else {
-    // Other years / direct routes: strictly department courses
-    const base = targetDeptId ? [...deptCourses, ...sharedCourses] : allCourses;
-    courses = base.filter(c => 
-      (c.academic_year || "1") === yearId && 
-      c.code !== "BACHELOR-PROG" && 
-      (!semesterId || semesterId === "all" || (c.semester || "1") === semesterId)
-    );
-  }
+  const courses = baseCourses.filter(c =>
+    (c.academic_year || "1") === yearId &&
+    c.code !== "BACHELOR-PROG" &&
+    (!semesterId || semesterId === "all" || (c.semester || "1") === semesterId)
+  );
 
   const department = departments.find(d => d.id === deptId || d.id === targetDeptId);
 
