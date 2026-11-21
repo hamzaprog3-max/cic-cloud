@@ -72,23 +72,56 @@ const YearCoursesPage = () => {
 
   const sharedCourses = allCourses.filter(c => sharedCourseIds.includes(c.id));
   
-  // Year 2 Semester 1 core computing courses are shared across computing departments.
-  // Year 1 is department-specific (Cyber has its own curriculum and does not take Physics).
-  const isCommonCore = yearId === "2" && semesterId === "1";
-  const rawCourses = isCommonCore
-    ? allCourses
-    : (targetDeptId ? [...deptCourses, ...sharedCourses] : allCourses);
-  
-  // Filter strictly by year and semester (never leak courses from one semester into another)
-  const inYear = rawCourses.filter(c => 
-    (c.academic_year || "1") === yearId && 
-    c.code !== "BACHELOR-PROG"
+  // Discrete Math course to show in Cyber Year 1 Semester 1 instead of Physics
+  const discreteMathCourse = allCourses.find(c => 
+    c.name.includes("الرياضيات غير المتصلة") || 
+    c.name.toLowerCase().includes("discrete") || 
+    c.code === "CS3"
   );
-  const inSemester = semesterId === "all"
-    ? inYear
-    : inYear.filter(c => (c.semester || "1") === semesterId);
 
-  const courses = inSemester;
+  let courses: Course[] = [];
+  if (yearId === "1") {
+    const isCyberDept = targetDeptId === "ca4069a4-fc50-4e96-8fb7-c1f4ea67da4f";
+    if (semesterId === "1") {
+      if (isCyberDept) {
+        // Cyber Year 1 Sem 1: foundational computing courses WITHOUT Physics, with Discrete Math
+        const base = allCourses.filter(c => 
+          (c.academic_year || "1") === "1" && 
+          (c.semester || "1") === "1" && 
+          !c.name.toLowerCase().includes("physics") && 
+          c.code !== "BS 121"
+        );
+        courses = discreteMathCourse ? [...base, discreteMathCourse] : base;
+      } else {
+        // CS Year 1 Sem 1: standard 6 courses (includes Physics)
+        courses = allCourses.filter(c => 
+          (c.academic_year || "1") === "1" && 
+          (c.semester || "1") === "1"
+        );
+      }
+    } else {
+      // Semester 2: strictly department-specific
+      courses = deptCourses.filter(c => 
+        (c.academic_year || "1") === "1" && 
+        (c.semester || "2") === "2"
+      );
+    }
+  } else if (yearId === "2" && semesterId === "1") {
+    // Year 2 Semester 1: core computing courses shared across computing departments
+    courses = allCourses.filter(c => 
+      (c.academic_year || "2") === "2" && 
+      (c.semester || "1") === "1" && 
+      c.code !== "BACHELOR-PROG"
+    );
+  } else {
+    // Other years / direct routes: strictly department courses
+    const base = targetDeptId ? [...deptCourses, ...sharedCourses] : allCourses;
+    courses = base.filter(c => 
+      (c.academic_year || "1") === yearId && 
+      c.code !== "BACHELOR-PROG" && 
+      (!semesterId || semesterId === "all" || (c.semester || "1") === semesterId)
+    );
+  }
 
   const department = departments.find(d => d.id === deptId || d.id === targetDeptId);
 
