@@ -16,6 +16,7 @@ interface R2Object {
   key: string;
   size: number;
   etag: string;
+  uploaded?: Date;
   httpMetadata?: R2HttpMetadata;
   range?: R2Range;
 }
@@ -45,6 +46,11 @@ interface R2MultipartUpload {
 interface R2Bucket {
   head(key: string): Promise<R2Object | null>;
   get(key: string, options?: { range?: R2Range }): Promise<R2ObjectBody | null>;
+  list(options?: { cursor?: string; limit?: number; prefix?: string }): Promise<{
+    objects: R2Object[];
+    truncated: boolean;
+    cursor?: string;
+  }>;
   put(
     key: string,
     value: ReadableStream<Uint8Array> | ArrayBuffer | ArrayBufferView | string | null,
@@ -1467,8 +1473,31 @@ export default {
       return jsonResponse({ error: "Method not allowed" }, 405, request);
     }
 
-    // R2 storage endpoints (view, download, upload, multipart upload)
+    // R2 storage endpoints (view, download, upload, multipart upload, owner list)
     if (url.pathname.startsWith("/api/r2/")) {
+      if (url.pathname === "/api/r2/list" && request.method === "GET") {
+        const claims = await verifyToken(request, env);
+        if (!claims || claims.role !== "owner") {
+          return jsonResponse({ error: "صلاحية المالك مطلوبة" }, 403, request);
+        }
+        const cursor = url.searchParams.get("cursor") || undefined;
+        const prefix = url.searchParams.get("prefix") || undefined;
+        const listed = await env.R2_BUCKET.list({ cursor, prefix, limit: 1000 });
+        return jsonResponse(
+          {
+            objects: listed.objects.map((o) => ({
+              key: o.key,
+              size: o.size,
+              uploaded: o.uploaded ? o.uploaded.toISOString() : null,
+              publicUrl: buildPublicUrl(o.key),
+            })),
+            truncated: listed.truncated,
+            cursor: listed.cursor || null,
+          },
+          200,
+          request
+        );
+      }
       if (url.pathname === "/api/r2/view" && (request.method === "GET" || request.method === "HEAD")) {
         return handleR2View(request, url, env);
       }
