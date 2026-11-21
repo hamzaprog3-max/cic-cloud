@@ -207,11 +207,6 @@ const YearCoursesPage = () => {
                           style={{ background: `hsl(${course.color} / 0.15)`, color: `hsl(${course.color})` }}>
                           {course.code}
                         </div>
-                        {deptId && course.department_id !== deptId && (
-                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-primary/10 text-primary font-medium ml-2 rtl:mr-2">
-                            {lang === "ar" ? "مشترك" : "Shared"}
-                          </span>
-                        )}
                       </div>
                       
                       <div className="text-start flex-1 mb-8">
