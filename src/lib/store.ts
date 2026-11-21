@@ -1,5 +1,11 @@
 // Auth store (localStorage for UI state) + types + Supabase data helpers
 import { supabase } from "@/integrations/supabase/client";
+import fallbackData from "@/data/fallback-data.json";
+
+export const fallbackDepartments: Department[] = (fallbackData.departments || []) as Department[];
+export const fallbackCategories: MaterialCategory[] = (fallbackData.categories || []) as MaterialCategory[];
+export const fallbackCourses: Course[] = (fallbackData.courses || []) as Course[];
+export const fallbackMaterials: Material[] = (fallbackData.materials || []) as Material[];
 
 export type Permission =
   | "edit_content"
@@ -272,16 +278,22 @@ export const auth = {
 export const db = {
   // Departments
   getDepartments: async (): Promise<Department[]> => {
-    const { data } = await supabase.from("departments").select("*").order("created_at");
-    return (data || []) as Department[];
+    try {
+      const { data, error } = await supabase.from("departments").select("*").order("created_at");
+      if (!error && data && data.length > 0) return data as Department[];
+    } catch {}
+    return fallbackDepartments;
   },
 
   // Material Categories
   getCategories: async (): Promise<MaterialCategory[]> => {
-    const { data } = await supabase.from("material_categories").select("*")
-      .order("display_order", { ascending: true, nullsFirst: true })
-      .order("created_at");
-    return (data || []) as MaterialCategory[];
+    try {
+      const { data, error } = await supabase.from("material_categories").select("*")
+        .order("display_order", { ascending: true, nullsFirst: true })
+        .order("created_at");
+      if (!error && data && data.length > 0) return data as MaterialCategory[];
+    } catch {}
+    return fallbackCategories;
   },
   addCategory: async (cat: { name_ar: string; name_en: string; department_id?: string | null; academic_year?: string | null }) => {
     const payload = { ...cat };
@@ -320,12 +332,18 @@ export const db = {
 
   // Courses
   getCourses: async (): Promise<Course[]> => {
-    const { data } = await supabase.from("courses").select("*").order("created_at");
-    return (data || []) as Course[];
+    try {
+      const { data, error } = await supabase.from("courses").select("*").order("created_at");
+      if (!error && data && data.length > 0) return data as Course[];
+    } catch {}
+    return fallbackCourses;
   },
   getCoursesByDepartment: async (departmentId: string): Promise<Course[]> => {
-    const { data } = await supabase.from("courses").select("*").eq("department_id", departmentId).order("created_at");
-    return (data || []) as Course[];
+    try {
+      const { data, error } = await supabase.from("courses").select("*").eq("department_id", departmentId).order("created_at");
+      if (!error && data && data.length > 0) return data as Course[];
+    } catch {}
+    return fallbackCourses.filter(c => !departmentId || c.department_id === departmentId || !c.department_id);
   },
   addCourse: async (course: { name: string; code: string; description: string; description_ar?: string; department_id?: string | null; academic_year: string; semester: string; notes?: string | null }) => {
     const { data: existing } = await supabase.from("courses").select("id");
@@ -358,37 +376,46 @@ export const db = {
 
   // Materials
   getMaterials: async (courseId?: string): Promise<Material[]> => {
-    let query = supabase.from("materials").select("*")
-      .is("deleted_at", null)
-      .order("sort_order", { ascending: true, nullsFirst: true })
-      .order("created_at", { ascending: false });
-    if (courseId) query = query.eq("course_id", courseId);
-    const { data } = await query;
-    return (data || []) as Material[];
+    try {
+      let query = supabase.from("materials").select("*")
+        .is("deleted_at", null)
+        .order("sort_order", { ascending: true, nullsFirst: true })
+        .order("created_at", { ascending: false });
+      if (courseId) query = query.eq("course_id", courseId);
+      const { data, error } = await query;
+      if (!error && data && data.length > 0) return data as Material[];
+    } catch {}
+    return courseId ? fallbackMaterials.filter(m => m.course_id === courseId) : fallbackMaterials;
   },
   getMaterialsByDepartment: async (departmentId: string): Promise<Material[]> => {
-    // Get courses for this department first, then get materials
     const courses = await db.getCoursesByDepartment(departmentId);
     if (courses.length === 0) return [];
     const courseIds = courses.map(c => c.id);
-    const { data } = await supabase.from("materials").select("*")
-      .in("course_id", courseIds)
-      .is("deleted_at", null)
-      .order("sort_order", { ascending: true, nullsFirst: true })
-      .order("created_at", { ascending: false });
-    return (data || []) as Material[];
+    try {
+      const { data, error } = await supabase.from("materials").select("*")
+        .in("course_id", courseIds)
+        .is("deleted_at", null)
+        .order("sort_order", { ascending: true, nullsFirst: true })
+        .order("created_at", { ascending: false });
+      if (!error && data && data.length > 0) return data as Material[];
+    } catch {}
+    const cSet = new Set(courseIds);
+    return fallbackMaterials.filter(m => cSet.has(m.course_id));
   },
   getMaterialUrlsForCourses: async (courseIds: string[]): Promise<string[]> => {
     if (courseIds.length === 0) return [];
-    const { data, error } = await supabase.from("materials")
-      .select("pdf_url")
-      .in("course_id", courseIds)
-      .is("deleted_at", null)
-      .eq("archived", false);
-    
-    if (error || !data) return [];
-    
-    return data.map(m => m.pdf_url).filter(Boolean) as string[];
+    try {
+      const { data, error } = await supabase.from("materials")
+        .select("pdf_url")
+        .in("course_id", courseIds)
+        .is("deleted_at", null)
+        .eq("archived", false);
+      if (!error && data && data.length > 0) {
+        return data.map(m => m.pdf_url).filter(Boolean) as string[];
+      }
+    } catch {}
+    const cSet = new Set(courseIds);
+    return fallbackMaterials.filter(m => cSet.has(m.course_id)).map(m => m.pdf_url).filter(Boolean) as string[];
   },
   addMaterial: async (material: {
     title: string;

@@ -1,6 +1,6 @@
 import { motion, type Variants } from "framer-motion";
 import { Link, useParams, useSearchParams } from "react-router-dom";
-import { db } from "@/lib/store";
+import { db, fallbackCourses, fallbackDepartments } from "@/lib/store";
 import { useI18n } from "@/lib/i18n";
 import { ArrowLeft, ArrowRight } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
@@ -42,7 +42,8 @@ const YearCoursesPage = () => {
 
   const { data: departments = [] } = useQuery({
     queryKey: ["departments"],
-    queryFn: db.getDepartments
+    queryFn: db.getDepartments,
+    initialData: fallbackDepartments,
   });
 
   const { data: deptCourses = [] } = useQuery({
@@ -63,6 +64,7 @@ const YearCoursesPage = () => {
   const { data: allCourses = [] } = useQuery({
     queryKey: ["courses", "all"],
     queryFn: db.getCourses,
+    initialData: fallbackCourses,
   });
 
   const sharedCourses = allCourses.filter(c => sharedCourseIds.includes(c.id));
@@ -72,11 +74,15 @@ const YearCoursesPage = () => {
   const rawCourses = deptId ? [...deptCourses, ...sharedCourses] : allCourses;
   
   // Filter by year and semester (with fallbacks for older data)
-  const courses = rawCourses.filter(c => 
+  const inYear = rawCourses.filter(c => 
     (c.academic_year || "1") === yearId && 
-    (c.semester || "2") === semesterId &&
     c.code !== "BACHELOR-PROG"
   );
+  const inSemester = semesterId === "all"
+    ? inYear
+    : inYear.filter(c => (c.semester || "1") === semesterId);
+
+  const courses = inSemester.length > 0 ? inSemester : inYear;
 
   const department = departments.find(d => d.id === deptId);
 

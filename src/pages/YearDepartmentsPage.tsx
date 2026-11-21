@@ -1,6 +1,6 @@
 import { motion, type Variants } from "framer-motion";
 import { Link, useParams } from "react-router-dom";
-import { db } from "@/lib/store";
+import { db, fallbackDepartments, fallbackCourses } from "@/lib/store";
 import { useI18n } from "@/lib/i18n";
 import { ArrowLeft, ArrowRight, Monitor, Brain } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
@@ -44,12 +44,14 @@ const YearDepartmentsPage = () => {
   }, [yearId]);
   const { data: allDepartments = [] } = useQuery({
     queryKey: ["departments"],
-    queryFn: db.getDepartments
+    queryFn: db.getDepartments,
+    initialData: fallbackDepartments,
   });
 
   const { data: allCourses = [] } = useQuery({
     queryKey: ["courses"],
-    queryFn: db.getCourses
+    queryFn: db.getCourses,
+    initialData: fallbackCourses,
   });
 
   const yearCourses = allCourses.filter(c => (c.academic_year || "1") === yearId);

@@ -3,7 +3,7 @@ import { Info, ArrowDownToLine } from "lucide-react"; // أيقونة للتنب
 import { useParams, useSearchParams, useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { useState, useEffect, useRef, useMemo } from "react";
-import { db, categoriesForDepartment } from "@/lib/store";
+import { db, categoriesForDepartment, fallbackCourses, fallbackCategories, fallbackMaterials } from "@/lib/store";
 import { useI18n } from "@/lib/i18n";
 import { useQuery } from "@tanstack/react-query";
 import MaterialCard from "@/components/MaterialCard";
@@ -20,7 +20,7 @@ const CoursePage = () => {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const { data: courses = [] } = useQuery({ queryKey: ["courses"], queryFn: db.getCourses });
+  const { data: courses = [] } = useQuery({ queryKey: ["courses"], queryFn: db.getCourses, initialData: fallbackCourses });
   
   const course = id
     ? courses.find(c => c.id === id)
@@ -29,12 +29,14 @@ const CoursePage = () => {
   const { data: allMaterials = [] } = useQuery({ 
     queryKey: ["materials", course?.id], 
     queryFn: () => db.getMaterials(course?.id),
+    initialData: course?.id ? fallbackMaterials.filter(m => m.course_id === course.id) : undefined,
     enabled: !!course?.id
   });
   
   const { data: allCategories = [] } = useQuery({
     queryKey: ["material_categories"],
     queryFn: db.getCategories,
+    initialData: fallbackCategories,
   });
 
   // Categories scoped to this course's department and academic year (unified + specific)
