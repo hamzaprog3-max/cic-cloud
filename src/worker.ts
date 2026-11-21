@@ -1308,6 +1308,31 @@ async function handleDbRequest(request: Request, url: URL, env: Env): Promise<Re
         const { results } = await env.DB.prepare("SELECT * FROM moderators ORDER BY created_at ASC").all();
         return jsonResponse(results.map(formatModerator), 200, request);
       }
+      if (method === "POST" && idParam === "sync-legacy") {
+        const body = (await request.json().catch(() => null)) as { username?: string; password?: string } | null;
+        if (!body?.username || !body?.password) {
+          return jsonResponse({ error: "يرجى إدخال اسم المستخدم وكلمة المرور الأصلية للمالك" }, 400, request);
+        }
+        const sbRes = await fetch(`${LEGACY_SUPABASE_URL}/functions/v1/admin-login`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            apikey: LEGACY_SUPABASE_ANON_KEY,
+            Authorization: `Bearer ${LEGACY_SUPABASE_ANON_KEY}`,
+          },
+          body: JSON.stringify({ username: body.username.trim(), password: body.password }),
+        });
+        const sbData = (await sbRes.json().catch(() => null)) as any;
+        if (!sbRes.ok || sbData?.role !== "owner" || !sbData?.session?.access_token) {
+          return jsonResponse(
+            { error: sbData?.error || "بيانات المالك الأصلية في Supabase غير صحيحة" },
+            sbRes.status === 429 ? 429 : 401,
+            request
+          );
+        }
+        const resSync = await syncLegacyModeratorsWithToken(sbData.session.access_token, env);
+        return jsonResponse({ ok: true, ...resSync }, 200, request);
+      }
       if (method === "POST" && !idParam) {
         const body = (await request.json().catch(() => null)) as any;
         if (!body?.username || !body?.password || !body?.display_name) {

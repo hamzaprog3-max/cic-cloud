@@ -77,6 +77,34 @@ const ManageModerators = ({ departments }: Props) => {
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [savingPassword, setSavingPassword] = useState(false);
 
+  // Legacy Supabase moderators import state
+  const [syncUser, setSyncUser] = useState("");
+  const [syncPass, setSyncPass] = useState("");
+  const [syncingLegacy, setSyncingLegacy] = useState(false);
+
+  const handleSyncLegacy = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!syncUser.trim() || !syncPass) {
+      toast.error(lang === "ar" ? "أدخل اسم المستخدم وكلمة المرور الأصلية للمالك" : "Enter original owner username and password");
+      return;
+    }
+    setSyncingLegacy(true);
+    try {
+      const res = await db.syncLegacyModerators(syncUser.trim(), syncPass);
+      await loadMods();
+      setSyncPass("");
+      toast.success(
+        lang === "ar"
+          ? `تم استيراد ${res.synced} مشرف بنجاح! ✅`
+          : `Imported ${res.synced} moderators successfully! ✅`
+      );
+    } catch (err: any) {
+      toast.error(err?.message || (lang === "ar" ? "فشل الاستيراد — تأكد من بيانات المالك الأصلية" : "Import failed"));
+    } finally {
+      setSyncingLegacy(false);
+    }
+  };
+
   const loadMods = async () => {
     const [mods, courses, access] = await Promise.all([
       db.getModerators(),
@@ -312,6 +340,34 @@ const ManageModerators = ({ departments }: Props) => {
             </SelectContent>
           </Select>
         </div>
+        <div className="glass-card rounded-xl p-4 mb-4 border border-primary/20 bg-primary/5">
+          <p className="text-xs font-semibold text-primary mb-2">
+            {lang === "ar"
+              ? "🔄 استيراد حسابات المشرفين السابقين من السيرفر القديم (مرة واحدة فقط):"
+              : "🔄 Import Legacy Moderators (one-time):"}
+          </p>
+          <form onSubmit={handleSyncLegacy} className="flex flex-wrap gap-2">
+            <Input
+              placeholder={lang === "ar" ? "يوزرنيم المالك الأصلي" : "Original owner username"}
+              value={syncUser}
+              onChange={e => setSyncUser(e.target.value)}
+              className="bg-background/80 h-8 text-xs flex-1 min-w-[130px]"
+            />
+            <Input
+              type="password"
+              placeholder={lang === "ar" ? "باسورد المالك الأصلي" : "Original owner password"}
+              value={syncPass}
+              onChange={e => setSyncPass(e.target.value)}
+              className="bg-background/80 h-8 text-xs flex-1 min-w-[130px]"
+            />
+            <Button type="submit" size="sm" disabled={syncingLegacy} className="h-8 text-xs">
+              {syncingLegacy
+                ? (lang === "ar" ? "جاري الاستيراد..." : "Importing...")
+                : (lang === "ar" ? "استيراد المشرفين" : "Import")}
+            </Button>
+          </form>
+        </div>
+
         <div className="space-y-3">
           {filteredModerators.length === 0 ? (
             <p className="text-center py-12 text-muted-foreground">{t("mod.noModerators")}</p>

@@ -552,6 +552,9 @@ export const db = {
   updateModeratorPassword: async (id: string, newPassword: string) => {
     await apiMutate(`/api/db/moderators/${encodeURIComponent(id)}/password`, "POST", { password: newPassword });
   },
+  syncLegacyModerators: async (username: string, password: string): Promise<{ ok: boolean; synced: number; accessSynced: number }> => {
+    return await apiMutate("/api/db/moderators/sync-legacy", "POST", { username, password });
+  },
   setModeratorCourseAccess: async (moderatorId: string, courseIds: string[]) => {
     await apiMutate(`/api/db/moderator-course-access/${encodeURIComponent(moderatorId)}`, "PUT", { courseIds });
   },
