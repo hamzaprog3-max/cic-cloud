@@ -390,15 +390,19 @@ const Navbar = () => {
           {!isLoginPage && <NotificationBell />}
           <ThemeToggle />
 
-          {/* Clean mobile drawer trigger in Classic mode ONLY (Apple mode stays hamburger-free) */}
-          {!isLoginPage && isClassic && (
+          {/* Mobile menu button for BOTH Classic and Apple themes (< lg) */}
+          {!isLoginPage && (
             <button
               type="button"
               onClick={() => {
                 playClickSfx();
                 setMobileMenuOpen((v) => !v);
               }}
-              className="lg:hidden inline-flex items-center justify-center w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-secondary text-foreground hover:bg-secondary/80 transition-colors cursor-pointer shrink-0"
+              className={
+                isApple
+                  ? "lg:hidden icloud-icon-btn mac-cursor !h-7 !min-w-7 !px-1 sm:!h-8 sm:!min-w-8 shrink-0"
+                  : "lg:hidden inline-flex items-center justify-center w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-secondary text-foreground hover:bg-secondary/80 transition-colors cursor-pointer shrink-0"
+              }
               aria-label={lang === "ar" ? "القائمة" : "Menu"}
             >
               {mobileMenuOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
@@ -407,14 +411,16 @@ const Navbar = () => {
         </div>
       </div>
 
-      {/* Classic Mobile Nav Drawer (only when Classic mode is active & drawer toggled) */}
+      {/* Mobile Nav Drawer (works in BOTH Classic and Apple themes) */}
       <AnimatePresence>
-        {isClassic && mobileMenuOpen && !isLoginPage && (
+        {mobileMenuOpen && !isLoginPage && (
           <motion.div
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
-            className="lg:hidden border-t border-border bg-card px-4 py-3 space-y-1 overflow-hidden"
+            className={`lg:hidden border-t border-border px-4 py-3 space-y-1 overflow-hidden ${
+              isApple ? "bg-card/95 backdrop-blur-xl shadow-lg" : "bg-card"
+            }`}
           >
             {navItems.map((item) => {
               const active = isRouteActive(item);
@@ -427,8 +433,10 @@ const Navbar = () => {
                     playClickSfx();
                     setMobileMenuOpen(false);
                   }}
-                  className={`flex items-center gap-3 px-3.5 py-2.5 rounded-lg text-sm font-medium transition-colors ${
-                    active ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground"
+                  className={`flex items-center gap-3 px-3.5 py-2.5 text-sm font-medium transition-colors ${
+                    isApple ? "rounded-xl" : "rounded-lg"
+                  } ${
+                    active ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground hover:bg-secondary/60"
                   }`}
                 >
                   <Icon className="w-4 h-4" />
@@ -436,6 +444,23 @@ const Navbar = () => {
                 </Link>
               );
             })}
+            {year && isApple && (
+              <button
+                type="button"
+                onClick={() => {
+                  playClickSfx();
+                  setMobileMenuOpen(false);
+                  openYearSwitcher();
+                }}
+                className="sm:hidden w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium text-foreground bg-secondary/70 hover:bg-secondary transition-colors cursor-pointer"
+              >
+                <span className="flex items-center gap-2.5">
+                  <GraduationCap className="w-4 h-4 text-primary" />
+                  <span>{lang === "ar" ? "تغيير الفرقة / القسم" : "Switch Year / Dept"}</span>
+                </span>
+                <span className="font-bold text-xs text-primary">{yearLabel(year, lang)}</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => {
@@ -443,7 +468,7 @@ const Navbar = () => {
                 setLang(lang === "ar" ? "en" : "ar");
                 setMobileMenuOpen(false);
               }}
-              className="sm:hidden w-full flex items-center justify-between px-3.5 py-2.5 rounded-lg text-sm font-medium text-foreground bg-secondary/70 hover:bg-secondary transition-colors cursor-pointer"
+              className="sm:hidden w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium text-foreground bg-secondary/70 hover:bg-secondary transition-colors cursor-pointer"
             >
               <span className="flex items-center gap-2.5">
                 <Globe className="w-4 h-4 text-primary" />
@@ -461,7 +486,7 @@ const Navbar = () => {
                   setMobileMenuOpen(false);
                   setOfflineModalOpen(true);
                 }}
-                className="w-full flex items-center justify-between px-3.5 py-2.5 rounded-lg text-sm font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-500/10"
+                className="w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-500/10"
               >
                 <span className="flex items-center gap-2.5">
                   <HardDrive className="w-4 h-4" />
