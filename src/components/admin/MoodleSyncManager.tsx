@@ -1,5 +1,16 @@
 import { useState, useEffect, useCallback } from "react";
-import { RefreshCw, CheckCircle2, AlertTriangle, Clock, Play, ShieldCheck, KeyRound, Database } from "lucide-react";
+import {
+  RefreshCw,
+  CheckCircle2,
+  AlertTriangle,
+  Clock,
+  Play,
+  ShieldCheck,
+  KeyRound,
+  Database,
+  RotateCcw,
+  Sparkles,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -30,6 +41,13 @@ interface SyncRun {
   finished_at: string;
 }
 
+interface DedupDetail {
+  course: string;
+  removedTitle: string;
+  keptTitle: string;
+  reason: string;
+}
+
 interface SyncStatusResponse {
   config: {
     moodle_base_url: string;
@@ -58,7 +76,10 @@ export default function MoodleSyncManager({ onSynced }: { onSynced?: () => void 
   const [data, setData] = useState<SyncStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
-  const [syncingCourseId, setSyncingCourseId] = useState<string | null>(null);
+  const [resyncing, setResyncing] = useState(false);
+  const [deduping, setDeduping] = useState(false);
+  const [busyCourseKey, setBusyCourseKey] = useState<string | null>(null);
+  const [dedupReport, setDedupReport] = useState<{ message: string; details: DedupDetail[] } | null>(null);
   const [cookieInput, setCookieInput] = useState("");
   const [savingConfig, setSavingConfig] = useState(false);
   const [refreshingCache, setRefreshingCache] = useState(false);
@@ -99,7 +120,7 @@ export default function MoodleSyncManager({ onSynced }: { onSynced?: () => void 
       });
       if (!res.ok) throw new Error((await res.json().catch(() => null))?.error || "فشل الحفظ");
       setCookieInput("");
-      toast.success(lang === "ar" ? "تم حفظ جلسة مودل بنجاح — جاري الاختبار..." : "Session saved!");
+      toast.success(lang === "ar" ? "تم حفظ جلسة مودل بنجاح!" : "Session saved!");
       await loadStatus();
     } catch (err: any) {
       toast.error(err?.message || "فشل حفظ الجلسة");
@@ -138,7 +159,7 @@ export default function MoodleSyncManager({ onSynced }: { onSynced?: () => void 
   };
 
   const handleRunSync = async (onlyCourseId?: string) => {
-    if (onlyCourseId) setSyncingCourseId(onlyCourseId);
+    if (onlyCourseId) setBusyCourseKey(`sync:${onlyCourseId}`);
     else setSyncing(true);
     try {
       const res = await fetch(`${apiBase}/api/moodle-sync/run`, {
@@ -158,7 +179,68 @@ export default function MoodleSyncManager({ onSynced }: { onSynced?: () => void 
       toast.error(err?.message || "فشل تشغيل المزامنة");
     } finally {
       setSyncing(false);
-      setSyncingCourseId(null);
+      setBusyCourseKey(null);
+    }
+  };
+
+  const handleResyncRepair = async (mode: "repair" | "full_reset", onlyCourseId?: string) => {
+    if (mode === "full_reset") {
+      const confirmed = window.confirm(
+        lang === "ar"
+          ? "سيتم مسح سجل تتبع المزامنة وإعادة فحص كل ملفات مودل ومقارنتها بمحتوى أول 5 صفحات (بدون حذف أي ملفات حالية). متابعة؟"
+          : "This resets sync tracking and re-checks all Moodle items using 5-page content fingerprinting (existing files are kept). Continue?"
+      );
+      if (!confirmed) return;
+    }
+
+    if (onlyCourseId) setBusyCourseKey(`resync:${onlyCourseId}`);
+    else setResyncing(true);
+
+    try {
+      const res = await fetch(`${apiBase}/api/moodle-sync/resync`, {
+        method: "POST",
+        headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ mode, ...(onlyCourseId ? { onlyCourseId } : {}) }),
+      });
+      const result = await res.json();
+      if (result.ok) {
+        toast.success(result.message || "تمت إعادة المزامنة والإصلاح بنجاح ✅");
+        onSynced?.();
+      } else {
+        toast.error(result.message || result.error || "فشلت إعادة المزامنة");
+      }
+      await loadStatus();
+    } catch (err: any) {
+      toast.error(err?.message || "فشل إعادة المزامنة");
+    } finally {
+      setResyncing(false);
+      setBusyCourseKey(null);
+    }
+  };
+
+  const handleContentDedup = async (onlyCourseId?: string) => {
+    if (onlyCourseId) setBusyCourseKey(`dedup:${onlyCourseId}`);
+    else setDeduping(true);
+    try {
+      const res = await fetch(`${apiBase}/api/moodle-sync/dedup`, {
+        method: "POST",
+        headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify(onlyCourseId ? { onlyCourseId } : {}),
+      });
+      const result = await res.json();
+      if (result.ok) {
+        setDedupReport({ message: result.message, details: result.details || [] });
+        toast.success(result.message);
+        if (result.duplicatesRemoved > 0) onSynced?.();
+      } else {
+        toast.error(result.error || "فشل فحص التكرارات");
+      }
+      await loadStatus();
+    } catch (err: any) {
+      toast.error(err?.message || "فشل فحص التكرارات بالمحتوى");
+    } finally {
+      setDeduping(false);
+      setBusyCourseKey(null);
     }
   };
 
@@ -193,6 +275,7 @@ export default function MoodleSyncManager({ onSynced }: { onSynced?: () => void 
 
   const cfg = data?.config;
   const isActive = cfg?.session_status === "active";
+  const anyGlobalBusy = syncing || resyncing || deduping;
 
   return (
     <div className="space-y-6">
@@ -201,11 +284,11 @@ export default function MoodleSyncManager({ onSynced }: { onSynced?: () => void 
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-lg font-display font-bold flex items-center gap-2">
-              <RefreshCw className={`w-5 h-5 text-primary ${syncing ? "animate-spin" : ""}`} />
-              {lang === "ar" ? "مزامنة مودل التلقائية 24/7 (Cloudflare Worker)" : "24/7 Automated Moodle Sync"}
+              <RefreshCw className={`w-5 h-5 text-primary ${anyGlobalBusy ? "animate-spin" : ""}`} />
+              {lang === "ar" ? "مزامنة مودل التلقائية 24/7 + مقارنة أول 5 صفحات" : "24/7 Moodle Sync + 5-Page Dedup"}
             </h2>
             <p className="text-xs text-muted-foreground mt-1">
-              {cfg?.cron_schedule || "تعمل تلقائياً كل 25 دقيقة على سيرفرات Cloudflare Workers لسحب المحاضرات والسكاشن والكويزات الجديدة ورفعها على R2 + D1."}
+              {cfg?.cron_schedule || "تعمل تلقائياً كل 25 دقيقة على Cloudflare Workers مع مقارنة SHA-256 ونص أول 5 صفحات/شرائح لمنع التكرار."}
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -222,9 +305,33 @@ export default function MoodleSyncManager({ onSynced }: { onSynced?: () => void 
                 : (lang === "ar" ? "تحديث كاش D1/R2" : "Refresh DB Cache")}
             </Button>
             <Button
+              variant="outline"
+              size="sm"
+              onClick={() => handleContentDedup()}
+              disabled={anyGlobalBusy}
+              className="gap-1.5"
+            >
+              <Sparkles className="w-4 h-4 text-amber-500" />
+              {deduping
+                ? (lang === "ar" ? "جاري فحص أول 5 صفحات..." : "Scanning 5 pages...")
+                : (lang === "ar" ? "فحص وتنظيف التكرارات (أول 5 صفحات)" : "5-Page Content Dedup")}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => handleResyncRepair("repair")}
+              disabled={anyGlobalBusy || !cfg?.has_cookie}
+              className="gap-1.5"
+            >
+              <RotateCcw className="w-4 h-4" />
+              {resyncing
+                ? (lang === "ar" ? "جاري إعادة المزامنة والإصلاح..." : "Repairing...")
+                : (lang === "ar" ? "إعادة المزامنة والإصلاح" : "Re-sync & Repair")}
+            </Button>
+            <Button
               size="sm"
               onClick={() => handleRunSync()}
-              disabled={syncing || !cfg?.has_cookie}
+              disabled={anyGlobalBusy || !cfg?.has_cookie}
               className="gap-1.5"
             >
               <Play className="w-4 h-4" />
@@ -298,6 +405,23 @@ export default function MoodleSyncManager({ onSynced }: { onSynced?: () => void 
           </div>
         )}
 
+        {dedupReport && (
+          <div className="text-xs px-3 py-2.5 rounded-lg bg-amber-500/10 text-foreground border border-amber-500/25 space-y-1.5">
+            <div className="font-semibold text-amber-700 dark:text-amber-400">
+              🔍 {dedupReport.message}
+            </div>
+            {dedupReport.details.length > 0 && (
+              <ul className="list-disc ps-5 space-y-0.5 text-[11px] text-muted-foreground">
+                {dedupReport.details.map((d, idx) => (
+                  <li key={idx}>
+                    <strong>{d.course}:</strong> حُذف «{d.removedTitle}» (مطابق لـ «{d.keptTitle}» — {d.reason})
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
         {cfg?.last_error && (
           <div className="text-xs px-3 py-2 rounded-lg bg-destructive/10 text-destructive border border-destructive/20">
             <strong>{lang === "ar" ? "تنبيه:" : "Alert:"}</strong> {cfg.last_error}
@@ -320,7 +444,7 @@ export default function MoodleSyncManager({ onSynced }: { onSynced?: () => void 
         </div>
         <p className="text-xs text-muted-foreground leading-relaxed">
           {lang === "ar"
-            ? "الـ Worker يقوم بتجديد الجلسة تلقائياً كل 25 دقيقة لبقائها شغالة 24 ساعة. في حال انتهاء الجلسة يوماً ما: افتح learn3.sha.edu.eg بعد تسجيل الدخول ← اضغط F12 ← Application ← Cookies ← انسخ قيمة MoodleSession والصقها هنا."
+            ? "الـ Worker يجدّد الجلسة تلقائياً كل 25 دقيقة لبقائها شغالة 24 ساعة. في حال انتهاء الجلسة يوماً ما: افتح learn3.sha.edu.eg بعد تسجيل الدخول ← اضغط F12 ← Application ← Cookies ← انسخ قيمة MoodleSession والصقها هنا."
             : "The worker pings Moodle every 25 minutes to keep the session alive 24/7. If it ever expires, copy MoodleSession from DevTools → Application → Cookies on learn3.sha.edu.eg and paste it here."}
         </p>
         <div className="flex flex-col sm:flex-row gap-2">
@@ -343,42 +467,82 @@ export default function MoodleSyncManager({ onSynced }: { onSynced?: () => void 
 
       {/* Mapped Year 2 CS Courses */}
       <div className="glass-card p-5 space-y-3">
-        <h3 className="text-sm font-bold">
-          {lang === "ar" ? "المواد المربوطة بالمزامنة (سنة تانية CS)" : "Mapped Moodle Courses"}
-        </h3>
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <h3 className="text-sm font-bold">
+            {lang === "ar" ? "المواد المربوطة بالمزامنة (سنة تانية CS)" : "Mapped Moodle Courses"}
+          </h3>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={anyGlobalBusy || !cfg?.has_cookie}
+            onClick={() => handleResyncRepair("full_reset")}
+            className="text-xs text-muted-foreground hover:text-foreground gap-1"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            {lang === "ar" ? "إعادة ضبط سجل المزامنة للكل" : "Full Reset Tracking"}
+          </Button>
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {(data?.courses || []).map((c) => (
-            <div
-              key={c.id}
-              className="rounded-xl border border-border/60 bg-secondary/30 p-3.5 flex items-center justify-between gap-3"
-            >
-              <div className="min-w-0 flex-1">
-                <div className="font-semibold text-sm truncate">{c.cic_course_name}</div>
-                <div className="text-xs text-muted-foreground truncate">
-                  Moodle #{c.moodle_course_id} — {c.moodle_course_name}
+          {(data?.courses || []).map((c) => {
+            const isSyncingThis = busyCourseKey === `sync:${c.moodle_course_id}`;
+            const isResyncingThis = busyCourseKey === `resync:${c.moodle_course_id}`;
+            const isDedupingThis = busyCourseKey === `dedup:${c.moodle_course_id}`;
+            const disableCourseBtns = anyGlobalBusy || Boolean(busyCourseKey);
+            return (
+              <div
+                key={c.id}
+                className="rounded-xl border border-border/60 bg-secondary/30 p-3.5 space-y-2.5"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="font-semibold text-sm truncate">{c.cic_course_name}</div>
+                    <div className="text-xs text-muted-foreground truncate">
+                      Moodle #{c.moodle_course_id} — {c.moodle_course_name}
+                    </div>
+                    <div className="text-[11px] text-muted-foreground mt-1 flex items-center gap-2 flex-wrap">
+                      <span>✅ متزامن: {c.stats.synced}</span>
+                      <span>🔗 مربوط قديم: {c.stats.linked}</span>
+                    </div>
+                  </div>
+                  <Switch
+                    checked={c.enabled}
+                    onCheckedChange={(v) => handleToggleCourse(c.id, v)}
+                  />
                 </div>
-                <div className="text-[11px] text-muted-foreground mt-1 flex items-center gap-2 flex-wrap">
-                  <span>✅ متزامن: {c.stats.synced}</span>
-                  <span>🔗 مربوط قديم: {c.stats.linked}</span>
+                <div className="flex items-center gap-1.5 flex-wrap pt-1 border-t border-border/40">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={disableCourseBtns || !cfg?.has_cookie}
+                    onClick={() => handleRunSync(c.moodle_course_id)}
+                    className="h-7 text-[11px] px-2.5"
+                  >
+                    {isSyncingThis ? "..." : (lang === "ar" ? "مزامنة" : "Sync")}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={disableCourseBtns || !cfg?.has_cookie}
+                    onClick={() => handleResyncRepair("full_reset", c.moodle_course_id)}
+                    className="h-7 text-[11px] px-2.5 gap-1"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    {isResyncingThis ? "..." : (lang === "ar" ? "إعادة وإصلاح" : "Re-sync")}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={disableCourseBtns}
+                    onClick={() => handleContentDedup(c.moodle_course_id)}
+                    className="h-7 text-[11px] px-2.5 gap-1"
+                  >
+                    <Sparkles className="w-3 h-3 text-amber-500" />
+                    {isDedupingThis ? "..." : (lang === "ar" ? "فحص مكرر (5 صفحات)" : "5-Page Dedup")}
+                  </Button>
                 </div>
               </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={syncing || syncingCourseId === c.moodle_course_id || !cfg?.has_cookie}
-                  onClick={() => handleRunSync(c.moodle_course_id)}
-                  className="h-8 text-xs"
-                >
-                  {syncingCourseId === c.moodle_course_id ? "..." : (lang === "ar" ? "مزامنة" : "Sync")}
-                </Button>
-                <Switch
-                  checked={c.enabled}
-                  onCheckedChange={(v) => handleToggleCourse(c.id, v)}
-                />
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 

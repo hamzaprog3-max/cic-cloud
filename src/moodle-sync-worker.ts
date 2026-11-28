@@ -10,8 +10,15 @@
  * - mod/forum    (skipped cleanly)
  */
 
+import {
+  computeContentFingerprint,
+  compareFingerprints,
+  type ContentFingerprint,
+} from "./content-fingerprint";
+
 export interface MoodleSyncEnv {
   R2_BUCKET: {
+    get(key: string): Promise<{ arrayBuffer(): Promise<ArrayBuffer>; size: number } | null>;
     put(
       key: string,
       value: ReadableStream<Uint8Array> | ArrayBuffer | ArrayBufferView | string | null,
@@ -542,6 +549,21 @@ export async function ensureMoodleSyncTables(env: MoodleSyncEnv): Promise<void> 
     )`
   ).run();
 
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS material_fingerprints (
+      material_id TEXT PRIMARY KEY,
+      course_id TEXT NOT NULL,
+      r2_key TEXT,
+      byte_size INTEGER NOT NULL DEFAULT 0,
+      sha256 TEXT,
+      kind TEXT NOT NULL DEFAULT 'binary',
+      tokens_json TEXT NOT NULL DEFAULT '[]',
+      stream_hashes_json TEXT NOT NULL DEFAULT '[]',
+      sample_text TEXT,
+      computed_at TEXT DEFAULT (datetime('now'))
+    )`
+  ).run();
+
   // Seed default config row if missing
   await env.DB.prepare(
     `INSERT OR IGNORE INTO moodle_sync_config (id, moodle_base_url, enabled, notify_students, session_status, updated_at)
@@ -844,6 +866,44 @@ export async function runMoodleSync(
       }
     }
 
+    // CONTENT-BASED DEDUP (SHA-256 + First 5 Pages/Slides text + PDF Page Stream Hashes!)
+    let incomingFp: ContentFingerprint | null = null;
+    try {
+      incomingFp = await computeContentFingerprint(fileBytes, decodedName || params.title);
+      const courseFps = await loadOrComputeCourseFingerprints(
+        env,
+        params.course.cic_course_id,
+        params.existingMaterials,
+        8
+      );
+      for (const existingFp of courseFps) {
+        const cmp = compareFingerprints(incomingFp, existingFp);
+        if (cmp.isMatch) {
+          await env.DB.prepare(
+            `INSERT OR IGNORE INTO moodle_sync_items (id, moodle_course_id, moodle_key, moodle_cmid, moodle_type, moodle_title, source_url, material_id, status, synced_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'linked_existing', ?)`
+          )
+            .bind(
+              crypto.randomUUID(),
+              params.course.moodle_course_id,
+              params.moodleKey,
+              params.cmid,
+              params.modType,
+              params.title,
+              params.pluginFileUrl,
+              existingFp.materialId,
+              new Date().toISOString()
+            )
+            .run();
+          params.trackedKeys.add(params.moodleKey);
+          itemsSkipped++;
+          return;
+        }
+      }
+    } catch (fpErr) {
+      console.warn("Fingerprint check skipped:", fpErr);
+    }
+
     const r2Key = sanitizeSyncR2Key(decodedName || params.title, `m${params.course.moodle_course_id}`);
     const contentType = callbacks.inferContentType(r2Key);
     await env.R2_BUCKET.put(r2Key, fileBytes, {
@@ -885,6 +945,10 @@ export async function runMoodleSync(
         nowIso
       )
       .run();
+
+    if (incomingFp) {
+      await saveMaterialFingerprint(env, materialId, params.course.cic_course_id, r2Key, incomingFp).catch(() => {});
+    }
 
     await env.DB.prepare(
       `INSERT OR IGNORE INTO moodle_sync_items (id, moodle_course_id, moodle_key, moodle_cmid, moodle_type, moodle_title, source_url, material_id, status, synced_at)
@@ -1319,5 +1383,358 @@ export async function runMoodleSync(
     newItems,
     errors,
     message: summaryText,
+  };
+}
+
+// ============ CONTENT FINGERPRINT STORE & ADMIN DEDUP / RESYNC TOOLS ============
+interface StoredFingerprint {
+  materialId: string;
+  courseId: string;
+  r2Key: string | null;
+  byteSize: number;
+  sha256: string | null;
+  kind: string;
+  tokens: string[];
+  streamHashes: string[];
+  sampleText: string;
+}
+
+function extractR2KeyFromUrl(rawUrl?: string | null): string | null {
+  if (!rawUrl || typeof rawUrl !== "string") return null;
+  try {
+    const u = new URL(rawUrl);
+    if (u.hostname.includes("r2.dev") || u.hostname.includes("r2.cloudflarestorage.com")) {
+      return decodeURIComponent(u.pathname.replace(/^\/+/, ""));
+    }
+    if (u.pathname === "/api/r2/view" || u.pathname === "/api/r2/download") {
+      return u.searchParams.get("key");
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveMaterialFingerprint(
+  env: MoodleSyncEnv,
+  materialId: string,
+  courseId: string,
+  r2Key: string,
+  fp: ContentFingerprint
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT OR REPLACE INTO material_fingerprints
+     (material_id, course_id, r2_key, byte_size, sha256, kind, tokens_json, stream_hashes_json, sample_text, computed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  )
+    .bind(
+      materialId,
+      courseId,
+      r2Key,
+      fp.byteSize,
+      fp.sha256,
+      fp.kind,
+      JSON.stringify(fp.tokens),
+      JSON.stringify(fp.streamHashes),
+      fp.sampleText,
+      new Date().toISOString()
+    )
+    .run();
+}
+
+async function loadOrComputeCourseFingerprints(
+  env: MoodleSyncEnv,
+  courseId: string,
+  materials: Array<Record<string, any>>,
+  maxToCompute = 12
+): Promise<StoredFingerprint[]> {
+  const { results: cachedRows } = await env.DB.prepare(
+    "SELECT * FROM material_fingerprints WHERE course_id = ?"
+  )
+    .bind(courseId)
+    .all<Record<string, any>>();
+
+  const byId = new Map<string, StoredFingerprint>();
+  for (const r of cachedRows) {
+    let tokens: string[] = [];
+    let streamHashes: string[] = [];
+    try {
+      tokens = JSON.parse(String(r.tokens_json || "[]"));
+    } catch {}
+    try {
+      streamHashes = JSON.parse(String(r.stream_hashes_json || "[]"));
+    } catch {}
+    byId.set(String(r.material_id), {
+      materialId: String(r.material_id),
+      courseId: String(r.course_id),
+      r2Key: r.r2_key ? String(r.r2_key) : null,
+      byteSize: Number(r.byte_size || 0),
+      sha256: r.sha256 ? String(r.sha256) : null,
+      kind: String(r.kind || "binary"),
+      tokens,
+      streamHashes,
+      sampleText: String(r.sample_text || ""),
+    });
+  }
+
+  let computed = 0;
+  for (const m of materials) {
+    if (byId.has(String(m.id))) continue;
+    if (computed >= maxToCompute) break;
+    const r2Key = extractR2KeyFromUrl(m.pdf_url);
+    if (!r2Key) continue;
+    if (!/\.(pdf|pptx|docx|txt)$/i.test(r2Key)) continue;
+
+    try {
+      const obj = await env.R2_BUCKET.get(r2Key);
+      if (!obj || obj.size === 0 || obj.size > 35 * 1024 * 1024) continue;
+      const buf = await obj.arrayBuffer();
+      const fp = await computeContentFingerprint(buf, r2Key);
+      await saveMaterialFingerprint(env, String(m.id), courseId, r2Key, fp);
+      byId.set(String(m.id), {
+        materialId: String(m.id),
+        courseId,
+        r2Key,
+        byteSize: fp.byteSize,
+        sha256: fp.sha256,
+        kind: fp.kind,
+        tokens: fp.tokens,
+        streamHashes: fp.streamHashes,
+        sampleText: fp.sampleText,
+      });
+      computed++;
+    } catch (err) {
+      console.warn("Failed fingerprinting R2 file", r2Key, err);
+    }
+  }
+
+  const activeIds = new Set(materials.map((m) => String(m.id)));
+  return Array.from(byId.values()).filter((fp) => activeIds.has(fp.materialId));
+}
+
+export interface DedupResult {
+  ok: boolean;
+  coursesScanned: number;
+  filesIndexedNow: number;
+  remainingUnindexed: number;
+  duplicatesRemoved: number;
+  details: Array<{
+    course: string;
+    removedTitle: string;
+    keptTitle: string;
+    reason: string;
+  }>;
+  message: string;
+}
+
+/**
+ * Scan R2 files across mapped courses, build 5-page content fingerprints, and remove duplicate materials cleanly.
+ */
+export async function dedupCoursesByContent(
+  env: MoodleSyncEnv,
+  callbacks: MoodleSyncCallbacks,
+  options: { onlyCourseId?: string; dryRun?: boolean } = {}
+): Promise<DedupResult> {
+  await ensureMoodleSyncTables(env);
+
+  const { results: mappedCourses } = options.onlyCourseId
+    ? await env.DB.prepare("SELECT * FROM moodle_sync_courses WHERE moodle_course_id = ?")
+        .bind(options.onlyCourseId)
+        .all<Record<string, any>>()
+    : await env.DB.prepare("SELECT * FROM moodle_sync_courses WHERE enabled = 1 ORDER BY moodle_course_id ASC")
+        .all<Record<string, any>>();
+
+  let totalBudget = 18; // Stay safely under Cloudflare Worker CPU/memory limits per HTTP request
+  let filesIndexedNow = 0;
+  let remainingUnindexed = 0;
+  let duplicatesRemoved = 0;
+  const details: DedupResult["details"] = [];
+
+  for (const course of mappedCourses) {
+    const { results: materials } = await env.DB.prepare(
+      "SELECT id, title, pdf_url, pdf_display_name, created_at FROM materials WHERE course_id = ? AND deleted_at IS NULL ORDER BY created_at ASC"
+    )
+      .bind(course.cic_course_id)
+      .all<Record<string, any>>();
+
+    const existingBefore = await env.DB.prepare(
+      "SELECT COUNT(*) AS cnt FROM material_fingerprints WHERE course_id = ?"
+    )
+      .bind(course.cic_course_id)
+      .first<{ cnt: number }>();
+    const beforeCnt = Number(existingBefore?.cnt || 0);
+
+    const fps = await loadOrComputeCourseFingerprints(
+      env,
+      course.cic_course_id,
+      materials,
+      Math.max(0, totalBudget)
+    );
+
+    const r2Eligible = materials.filter((m) => {
+      const k = extractR2KeyFromUrl(m.pdf_url);
+      return Boolean(k && /\.(pdf|pptx|docx|txt)$/i.test(k));
+    });
+    const newlyIndexed = Math.max(0, fps.length - beforeCnt);
+    filesIndexedNow += newlyIndexed;
+    totalBudget -= newlyIndexed;
+    if (r2Eligible.length > fps.length) {
+      remainingUnindexed += r2Eligible.length - fps.length;
+    }
+
+    const matById = new Map(materials.map((m) => [String(m.id), m]));
+    const removedIds = new Set<string>();
+
+    // Pairwise 5-page content & SHA-256 comparison
+    for (let i = 0; i < fps.length; i++) {
+      const a = fps[i];
+      if (removedIds.has(a.materialId)) continue;
+      for (let j = i + 1; j < fps.length; j++) {
+        const b = fps[j];
+        if (removedIds.has(b.materialId)) continue;
+
+        const cmp = compareFingerprints(a, b);
+        if (!cmp.isMatch) continue;
+
+        const matA = matById.get(a.materialId);
+        const matB = matById.get(b.materialId);
+        if (!matA || !matB) continue;
+
+        // Decide which copy to KEEP: prefer PDF over PPTX/DOCX, otherwise keep the older original
+        const aIsPdf = a.kind === "pdf";
+        const bIsPdf = b.kind === "pdf";
+        let keep = matA;
+        let remove = matB;
+        if (!aIsPdf && bIsPdf) {
+          keep = matB;
+          remove = matA;
+        } else if (aIsPdf === bIsPdf) {
+          if (String(matB.created_at || "") < String(matA.created_at || "")) {
+            keep = matB;
+            remove = matA;
+          }
+        }
+
+        removedIds.add(String(remove.id));
+        details.push({
+          course: String(course.cic_course_name),
+          removedTitle: String(remove.title),
+          keptTitle: String(keep.title),
+          reason: cmp.reason,
+        });
+
+        if (!options.dryRun) {
+          const nowIso = new Date().toISOString();
+          await env.DB.prepare("UPDATE materials SET deleted_at = ? WHERE id = ?")
+            .bind(nowIso, remove.id)
+            .run();
+          await env.DB.prepare(
+            "UPDATE moodle_sync_items SET status = 'linked_existing', material_id = ? WHERE material_id = ?"
+          )
+            .bind(keep.id, remove.id)
+            .run();
+          await env.DB.prepare("DELETE FROM material_fingerprints WHERE material_id = ?")
+            .bind(remove.id)
+            .run();
+          duplicatesRemoved++;
+        }
+      }
+    }
+  }
+
+  if (duplicatesRemoved > 0 && !options.dryRun) {
+    await env.DB.prepare(
+      `INSERT INTO audit_logs (id, admin_id, admin_name, action, details, action_type, related_material_id, material_snapshot, admin_year, created_at)
+       VALUES (?, '00000000-0000-0000-0000-000000000000', 'Content Dedup (5-Page)', ?, ?, 'delete', NULL, NULL, '2', ?)`
+    )
+      .bind(
+        crypto.randomUUID(),
+        `تنظيف ${duplicatesRemoved} ملف مكرر بمقارنة أول 5 صفحات`,
+        details.map((d) => `${d.course}: حذف "${d.removedTitle}" (مطابق لـ "${d.keptTitle}" — ${d.reason})`).join(" | ").slice(0, 1000),
+        new Date().toISOString()
+      )
+      .run()
+      .catch(() => {});
+    await callbacks.refreshPublicCache();
+  }
+
+  const msg =
+    duplicatesRemoved > 0
+      ? `تم فحص ${mappedCourses.length} مقرر، فهرسة ${filesIndexedNow} ملف جديد، وحذف ${duplicatesRemoved} ملف مكرر بنجاح!${remainingUnindexed > 0 ? ` (متبقي ${remainingUnindexed} ملف للفهرسة — اضغط مرة أخرى للاستكمال)` : ""}`
+      : `تم فحص ${mappedCourses.length} مقرر وفهرسة ${filesIndexedNow} ملف جديد — لم يُعثر على أي ملفات مكررة بالمحتوى!${remainingUnindexed > 0 ? ` (متبقي ${remainingUnindexed} ملف للفهرسة — اضغط مرة أخرى للاستكمال)` : ""}`;
+
+  return {
+    ok: true,
+    coursesScanned: mappedCourses.length,
+    filesIndexedNow,
+    remainingUnindexed,
+    duplicatesRemoved,
+    details,
+    message: msg,
+  };
+}
+
+/**
+ * Admin Repair / Re-sync:
+ *  - repair: removes broken moodle_sync_items (missing/deleted materials) + clears linked_existing so everything is re-verified
+ *  - full_reset: clears all moodle_sync_items for the target course(s) (keeps existing materials intact, re-matches via 5-page fingerprint + SHA-256!)
+ */
+export async function resyncAndRepairMoodle(
+  env: MoodleSyncEnv,
+  callbacks: MoodleSyncCallbacks,
+  options: { onlyCourseId?: string; mode?: "repair" | "full_reset" } = {}
+): Promise<MoodleSyncRunResult & { clearedTrackingRows: number }> {
+  await ensureMoodleSyncTables(env);
+  const mode = options.mode || "repair";
+  let clearedTrackingRows = 0;
+
+  if (mode === "full_reset") {
+    const res = options.onlyCourseId
+      ? await env.DB.prepare("DELETE FROM moodle_sync_items WHERE moodle_course_id = ?")
+          .bind(options.onlyCourseId)
+          .run()
+      : await env.DB.prepare("DELETE FROM moodle_sync_items").run();
+    clearedTrackingRows = Number(res.meta?.changes || 0);
+  } else {
+    // 1. Delete broken tracking rows where material was deleted or missing
+    const broken = options.onlyCourseId
+      ? await env.DB.prepare(
+          `DELETE FROM moodle_sync_items
+           WHERE moodle_course_id = ?
+             AND status != 'ignored_old'
+             AND (material_id IS NULL OR material_id NOT IN (SELECT id FROM materials WHERE deleted_at IS NULL))`
+        )
+          .bind(options.onlyCourseId)
+          .run()
+      : await env.DB.prepare(
+          `DELETE FROM moodle_sync_items
+           WHERE status != 'ignored_old'
+             AND (material_id IS NULL OR material_id NOT IN (SELECT id FROM materials WHERE deleted_at IS NULL))`
+        ).run();
+    clearedTrackingRows += Number(broken.meta?.changes || 0);
+
+    // 2. Also clear linked_existing rows so they are re-verified with the improved 5-page fingerprint matcher
+    const relink = options.onlyCourseId
+      ? await env.DB.prepare(
+          "DELETE FROM moodle_sync_items WHERE moodle_course_id = ? AND status = 'linked_existing'"
+        )
+          .bind(options.onlyCourseId)
+          .run()
+      : await env.DB.prepare("DELETE FROM moodle_sync_items WHERE status = 'linked_existing'").run();
+    clearedTrackingRows += Number(relink.meta?.changes || 0);
+  }
+
+  const runRes = await runMoodleSync(env, callbacks, {
+    triggerType: "manual",
+    force: true,
+    onlyCourseId: options.onlyCourseId,
+  });
+
+  await callbacks.refreshPublicCache().catch(() => {});
+
+  return {
+    ...runRes,
+    clearedTrackingRows,
+    message: `تم إعادة فحص ${clearedTrackingRows} سجل — ${runRes.message}`,
   };
 }

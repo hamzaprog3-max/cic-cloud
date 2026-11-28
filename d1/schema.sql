@@ -204,3 +204,19 @@ CREATE TABLE IF NOT EXISTS moodle_sync_runs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_moodle_sync_runs_started ON moodle_sync_runs(started_at DESC);
+
+CREATE TABLE IF NOT EXISTS material_fingerprints (
+  material_id TEXT PRIMARY KEY,
+  course_id TEXT NOT NULL,
+  r2_key TEXT,
+  byte_size INTEGER NOT NULL DEFAULT 0,
+  sha256 TEXT,
+  kind TEXT NOT NULL DEFAULT 'binary',
+  tokens_json TEXT NOT NULL DEFAULT '[]',
+  stream_hashes_json TEXT NOT NULL DEFAULT '[]',
+  sample_text TEXT,
+  computed_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_material_fp_course ON material_fingerprints(course_id);
+CREATE INDEX IF NOT EXISTS idx_material_fp_sha256 ON material_fingerprints(sha256);

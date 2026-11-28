@@ -1,5 +1,10 @@
 import { onRequestOptions as geminiOptions, onRequestPost as geminiPost } from "../functions/api/gemini";
-import { ensureMoodleSyncTables, runMoodleSync } from "./moodle-sync-worker";
+import {
+  ensureMoodleSyncTables,
+  runMoodleSync,
+  dedupCoursesByContent,
+  resyncAndRepairMoodle,
+} from "./moodle-sync-worker";
 
 interface R2HttpMetadata {
   contentType?: string;
@@ -1398,7 +1403,51 @@ async function handleMoodleSyncRequest(request: Request, url: URL, env: Env): Pr
           onlyCourseId: body?.onlyCourseId,
         }
       );
-      return jsonResponse(result, result.ok ? 200 : 200, request);
+      return jsonResponse(result, 200, request);
+    }
+
+    if (subPath === "resync" && method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as {
+        onlyCourseId?: string;
+        mode?: "repair" | "full_reset";
+      } | null;
+      const result = await resyncAndRepairMoodle(
+        env,
+        {
+          buildPublicUrl,
+          inferContentType,
+          refreshPublicCache: async () => {
+            await rebuildPublicSnapshot(env, url.origin);
+          },
+        },
+        {
+          onlyCourseId: body?.onlyCourseId,
+          mode: body?.mode || "repair",
+        }
+      );
+      return jsonResponse(result, 200, request);
+    }
+
+    if (subPath === "dedup" && method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as {
+        onlyCourseId?: string;
+        dryRun?: boolean;
+      } | null;
+      const result = await dedupCoursesByContent(
+        env,
+        {
+          buildPublicUrl,
+          inferContentType,
+          refreshPublicCache: async () => {
+            await rebuildPublicSnapshot(env, url.origin);
+          },
+        },
+        {
+          onlyCourseId: body?.onlyCourseId,
+          dryRun: Boolean(body?.dryRun),
+        }
+      );
+      return jsonResponse(result, 200, request);
     }
 
     return jsonResponse({ error: `Unknown moodle-sync route: ${method} /api/moodle-sync/${subPath}` }, 404, request);
