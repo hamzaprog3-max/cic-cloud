@@ -5,6 +5,11 @@ import {
   dedupCoursesByContent,
   resyncAndRepairMoodle,
 } from "./moodle-sync-worker";
+import {
+  ensureGdriveSyncTables,
+  extractDriveFolderId,
+  runGdriveSync,
+} from "./gdrive-sync-worker";
 
 interface R2HttpMetadata {
   contentType?: string;
@@ -1227,17 +1232,22 @@ async function handleMoodleSyncRequest(request: Request, url: URL, env: Env): Pr
   }
 
   await ensureMoodleSyncTables(env);
+  await ensureGdriveSyncTables(env);
   const subPath = url.pathname.replace(/^\/api\/moodle-sync\/?/, "");
   const method = request.method;
 
   try {
     if (subPath === "status" && method === "GET") {
-      const [cfg, coursesRes, runsRes, countsRes] = await Promise.all([
+      const [cfg, coursesRes, runsRes, countsRes, gdFoldersRes, gdCountsRes] = await Promise.all([
         env.DB.prepare("SELECT * FROM moodle_sync_config WHERE id = 'default'").first<Record<string, any>>(),
         env.DB.prepare("SELECT * FROM moodle_sync_courses ORDER BY moodle_course_id ASC").all<Record<string, any>>(),
         env.DB.prepare("SELECT * FROM moodle_sync_runs ORDER BY started_at DESC LIMIT 15").all<Record<string, any>>(),
         env.DB.prepare(
           "SELECT moodle_course_id, status, COUNT(*) AS cnt FROM moodle_sync_items GROUP BY moodle_course_id, status"
+        ).all<Record<string, any>>(),
+        env.DB.prepare("SELECT * FROM gdrive_sync_folders ORDER BY created_at ASC").all<Record<string, any>>(),
+        env.DB.prepare(
+          "SELECT drive_folder_id, status, COUNT(*) AS cnt FROM gdrive_sync_items GROUP BY drive_folder_id, status"
         ).all<Record<string, any>>(),
       ]);
 
@@ -1252,6 +1262,14 @@ async function handleMoodleSyncRequest(request: Request, url: URL, env: Env): Pr
         if (!itemCounts[cid]) itemCounts[cid] = { synced: 0, linked: 0 };
         if (r.status === "synced") itemCounts[cid].synced += Number(r.cnt || 0);
         else if (r.status === "linked_existing") itemCounts[cid].linked += Number(r.cnt || 0);
+      }
+
+      const gdItemCounts: Record<string, { synced: number; linked: number }> = {};
+      for (const r of gdCountsRes.results) {
+        const fid = String(r.drive_folder_id);
+        if (!gdItemCounts[fid]) gdItemCounts[fid] = { synced: 0, linked: 0 };
+        if (r.status === "synced") gdItemCounts[fid].synced += Number(r.cnt || 0);
+        else if (r.status === "linked_existing") gdItemCounts[fid].linked += Number(r.cnt || 0);
       }
 
       return jsonResponse(
@@ -1269,13 +1287,18 @@ async function handleMoodleSyncRequest(request: Request, url: URL, env: Env): Pr
                 last_error: cfg.last_error,
                 last_summary: cfg.last_summary,
                 updated_at: cfg.updated_at,
-                cron_schedule: "كل 25 دقيقة تلقائياً (24/7 على Cloudflare Workers)",
+                cron_schedule: "كل 25 دقيقة تلقائياً (24/7 على Cloudflare Workers — Moodle + Google Drive)",
               }
             : null,
           courses: coursesRes.results.map((c) => ({
             ...c,
             enabled: Boolean(c.enabled),
             stats: itemCounts[String(c.moodle_course_id)] || { synced: 0, linked: 0 },
+          })),
+          gdriveFolders: gdFoldersRes.results.map((f) => ({
+            ...f,
+            enabled: Boolean(f.enabled),
+            stats: gdItemCounts[String(f.drive_folder_id)] || { synced: 0, linked: 0 },
           })),
           runs: runsRes.results.map((r) => {
             let errs: string[] = [];
@@ -1448,6 +1471,85 @@ async function handleMoodleSyncRequest(request: Request, url: URL, env: Env): Pr
         }
       );
       return jsonResponse(result, 200, request);
+    }
+
+    if (subPath === "gdrive/run" && method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as { onlyFolderId?: string } | null;
+      const result = await runGdriveSync(
+        env,
+        {
+          buildPublicUrl,
+          inferContentType,
+          refreshPublicCache: async () => {
+            await rebuildPublicSnapshot(env, url.origin);
+          },
+        },
+        { onlyFolderId: body?.onlyFolderId }
+      );
+      return jsonResponse(result, 200, request);
+    }
+
+    if (subPath === "gdrive/folders" && method === "POST") {
+      const body = (await request.json().catch(() => null)) as {
+        folder_url?: string;
+        folder_name?: string;
+        cic_course_id?: string;
+        cic_course_name?: string;
+        default_category_id?: string | null;
+      } | null;
+      const folderId = extractDriveFolderId(body?.folder_url || "");
+      if (!folderId || !body?.cic_course_id) {
+        return jsonResponse({ error: "رابط مجلد Google Drive والمقرر مطلوبان" }, 400, request);
+      }
+      const existing = await env.DB.prepare("SELECT id FROM gdrive_sync_folders WHERE drive_folder_id = ?")
+        .bind(folderId)
+        .first<{ id: string }>();
+      if (existing) {
+        await env.DB.prepare(
+          "UPDATE gdrive_sync_folders SET folder_name = ?, cic_course_id = ?, cic_course_name = ?, default_category_id = ?, enabled = 1 WHERE id = ?"
+        )
+          .bind(
+            body.folder_name?.trim() || folderId,
+            body.cic_course_id,
+            body.cic_course_name || body.cic_course_id,
+            body.default_category_id ?? null,
+            existing.id
+          )
+          .run();
+      } else {
+        await env.DB.prepare(
+          `INSERT INTO gdrive_sync_folders (id, drive_folder_id, folder_name, cic_course_id, cic_course_name, default_category_id, enabled, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, 1, ?)`
+        )
+          .bind(
+            `gd-folder-${folderId.slice(0, 12)}`,
+            folderId,
+            body.folder_name?.trim() || `Drive Folder (${folderId.slice(0, 8)})`,
+            body.cic_course_id,
+            body.cic_course_name || body.cic_course_id,
+            body.default_category_id ?? null,
+            new Date().toISOString()
+          )
+          .run();
+      }
+      return jsonResponse({ ok: true, drive_folder_id: folderId }, 200, request);
+    }
+
+    if (subPath.startsWith("gdrive/folders/") && method === "PATCH") {
+      const rowId = decodeURIComponent(subPath.slice("gdrive/folders/".length));
+      const body = (await request.json().catch(() => null)) as { enabled?: boolean } | null;
+      if (typeof body?.enabled === "boolean") {
+        await env.DB.prepare("UPDATE gdrive_sync_folders SET enabled = ? WHERE id = ?")
+          .bind(body.enabled ? 1 : 0, rowId)
+          .run();
+      }
+      return jsonResponse({ ok: true }, 200, request);
+    }
+
+    if (subPath.startsWith("gdrive/folders/") && method === "DELETE") {
+      const rowId = decodeURIComponent(subPath.slice("gdrive/folders/".length));
+      await env.DB.prepare("DELETE FROM gdrive_sync_folders WHERE id = ?").bind(rowId).run();
+      return jsonResponse({ ok: true }, 200, request);
     }
 
     return jsonResponse({ error: `Unknown moodle-sync route: ${method} /api/moodle-sync/${subPath}` }, 404, request);
@@ -2334,26 +2436,28 @@ export default {
     return env.ASSETS.fetch(request);
   },
 
-  // 24/7 Automated Cron Trigger (runs every 25 minutes on Cloudflare's edge servers!)
+  // 24/7 Automated Cron Trigger (runs every 25 minutes on Cloudflare's edge servers for BOTH Moodle + Google Drive!)
   async scheduled(
     _controller: { scheduledTime: number; cron: string },
     env: Env,
     ctx: { waitUntil(p: Promise<unknown>): void }
   ): Promise<void> {
+    const callbacks = {
+      buildPublicUrl,
+      inferContentType,
+      refreshPublicCache: async () => {
+        await rebuildPublicSnapshot(env, "https://cic-cloud.com");
+      },
+    };
     ctx.waitUntil(
-      runMoodleSync(
-        env,
-        {
-          buildPublicUrl,
-          inferContentType,
-          refreshPublicCache: async () => {
-            await rebuildPublicSnapshot(env, "https://cic-cloud.com");
-          },
-        },
-        { triggerType: "cron" }
-      ).catch((err) => {
-        console.error("Scheduled Moodle sync error:", err);
-      })
+      (async () => {
+        await runMoodleSync(env, callbacks, { triggerType: "cron" }).catch((err) => {
+          console.error("Scheduled Moodle sync error:", err);
+        });
+        await runGdriveSync(env, callbacks).catch((err) => {
+          console.error("Scheduled Google Drive sync error:", err);
+        });
+      })()
     );
   },
 };

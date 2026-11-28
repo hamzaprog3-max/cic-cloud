@@ -1209,7 +1209,7 @@ const AdminDashboard = () => {
           </div>
         )}
 
-        {activeSection === "moodle_sync" && isOwner && <MoodleSyncManager onSynced={loadData} />}
+        {activeSection === "moodle_sync" && isOwner && <MoodleSyncManager courses={courses} onSynced={loadData} />}
         {activeSection === "notifications" && <NotificationManager />}
         {activeSection === "notification_templates" && isOwner && <NotificationTemplateManager />}
         {activeSection === "announcements" && (isOwner || auth.hasPermission("announcements")) && <AnnouncementManager />}

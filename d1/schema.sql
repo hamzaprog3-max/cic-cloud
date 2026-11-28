@@ -220,3 +220,31 @@ CREATE TABLE IF NOT EXISTS material_fingerprints (
 
 CREATE INDEX IF NOT EXISTS idx_material_fp_course ON material_fingerprints(course_id);
 CREATE INDEX IF NOT EXISTS idx_material_fp_sha256 ON material_fingerprints(sha256);
+
+-- ============ GOOGLE DRIVE 24/7 AUTO-SYNC TABLES ============
+CREATE TABLE IF NOT EXISTS gdrive_sync_folders (
+  id TEXT PRIMARY KEY,
+  drive_folder_id TEXT NOT NULL UNIQUE,
+  folder_name TEXT NOT NULL,
+  cic_course_id TEXT NOT NULL,
+  cic_course_name TEXT NOT NULL,
+  default_category_id TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_synced_at TEXT,
+  last_summary TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS gdrive_sync_items (
+  id TEXT PRIMARY KEY,
+  drive_folder_id TEXT NOT NULL,
+  drive_file_id TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  subfolder_path TEXT DEFAULT '',
+  material_id TEXT,
+  status TEXT NOT NULL DEFAULT 'synced',
+  synced_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(drive_folder_id, drive_file_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_gdrive_sync_items_folder ON gdrive_sync_items(drive_folder_id, drive_file_id);

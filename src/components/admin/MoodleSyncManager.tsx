@@ -10,7 +10,11 @@ import {
   Database,
   RotateCcw,
   Sparkles,
+  FolderSync,
+  Plus,
+  Trash2,
 } from "lucide-react";
+import type { Course } from "@/lib/store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -48,6 +52,19 @@ interface DedupDetail {
   reason: string;
 }
 
+interface GdriveFolderRow {
+  id: string;
+  drive_folder_id: string;
+  folder_name: string;
+  cic_course_id: string;
+  cic_course_name: string;
+  default_category_id: string | null;
+  enabled: boolean;
+  last_synced_at: string | null;
+  last_summary: string | null;
+  stats: { synced: number; linked: number };
+}
+
 interface SyncStatusResponse {
   config: {
     moodle_base_url: string;
@@ -63,6 +80,7 @@ interface SyncStatusResponse {
     cron_schedule: string;
   } | null;
   courses: SyncCourse[];
+  gdriveFolders?: GdriveFolderRow[];
   runs: SyncRun[];
 }
 
@@ -71,18 +89,29 @@ function getAuthHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-export default function MoodleSyncManager({ onSynced }: { onSynced?: () => void }) {
+export default function MoodleSyncManager({
+  courses: allCicCourses = [],
+  onSynced,
+}: {
+  courses?: Course[];
+  onSynced?: () => void;
+}) {
   const { lang } = useI18n();
   const [data, setData] = useState<SyncStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [resyncing, setResyncing] = useState(false);
   const [deduping, setDeduping] = useState(false);
+  const [gdSyncing, setGdSyncing] = useState(false);
   const [busyCourseKey, setBusyCourseKey] = useState<string | null>(null);
   const [dedupReport, setDedupReport] = useState<{ message: string; details: DedupDetail[] } | null>(null);
   const [cookieInput, setCookieInput] = useState("");
   const [savingConfig, setSavingConfig] = useState(false);
   const [refreshingCache, setRefreshingCache] = useState(false);
+  const [newDriveUrl, setNewDriveUrl] = useState("");
+  const [newDriveName, setNewDriveName] = useState("");
+  const [newDriveCourseId, setNewDriveCourseId] = useState("");
+  const [addingDrive, setAddingDrive] = useState(false);
 
   const apiBase = getWorkerApiBase();
 
@@ -244,6 +273,90 @@ export default function MoodleSyncManager({ onSynced }: { onSynced?: () => void 
     }
   };
 
+  const handleRunGdriveSync = async (onlyFolderId?: string) => {
+    if (onlyFolderId) setBusyCourseKey(`gd:${onlyFolderId}`);
+    else setGdSyncing(true);
+    try {
+      const res = await fetch(`${apiBase}/api/moodle-sync/gdrive/run`, {
+        method: "POST",
+        headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify(onlyFolderId ? { onlyFolderId } : {}),
+      });
+      const result = await res.json();
+      if (result.ok) {
+        toast.success(result.message || "اكتملت مزامنة Google Drive ✅");
+        if (result.itemsAdded > 0 || result.itemsUpgraded > 0) onSynced?.();
+      } else {
+        toast.error(result.message || result.error || "فشلت مزامنة Google Drive");
+      }
+      await loadStatus();
+    } catch (err: any) {
+      toast.error(err?.message || "فشل تشغيل مزامنة Google Drive");
+    } finally {
+      setGdSyncing(false);
+      setBusyCourseKey(null);
+    }
+  };
+
+  const handleAddGdriveFolder = async () => {
+    if (!newDriveUrl.trim() || !newDriveCourseId) {
+      toast.error(lang === "ar" ? "أدخل رابط مجلد Google Drive واختر المقرر" : "Enter Drive folder URL and select a course");
+      return;
+    }
+    const chosenCourse = allCicCourses.find((c) => c.id === newDriveCourseId);
+    setAddingDrive(true);
+    try {
+      const res = await fetch(`${apiBase}/api/moodle-sync/gdrive/folders`, {
+        method: "POST",
+        headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          folder_url: newDriveUrl.trim(),
+          folder_name: newDriveName.trim() || chosenCourse?.name || "Google Drive Folder",
+          cic_course_id: newDriveCourseId,
+          cic_course_name: chosenCourse ? `${chosenCourse.name}${chosenCourse.code ? ` (${chosenCourse.code})` : ""}` : newDriveCourseId,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || "فشل إضافة المجلد");
+      setNewDriveUrl("");
+      setNewDriveName("");
+      setNewDriveCourseId("");
+      toast.success(lang === "ar" ? "تمت إضافة مجلد Google Drive للمزامنة 24/7 ✅" : "Drive folder added ✅");
+      await loadStatus();
+    } catch (err: any) {
+      toast.error(err?.message || "فشل الإضافة");
+    } finally {
+      setAddingDrive(false);
+    }
+  };
+
+  const handleToggleGdriveFolder = async (rowId: string, enabled: boolean) => {
+    try {
+      await fetch(`${apiBase}/api/moodle-sync/gdrive/folders/${encodeURIComponent(rowId)}`, {
+        method: "PATCH",
+        headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      await loadStatus();
+    } catch {
+      toast.error("فشل تحديث حالة المجلد");
+    }
+  };
+
+  const handleDeleteGdriveFolder = async (rowId: string) => {
+    if (!window.confirm(lang === "ar" ? "حذف ربط مجلد Google Drive هذا من المزامنة؟ (الملفات المرفوعة بالفعل ستبقى)" : "Remove this Drive folder from sync?")) return;
+    try {
+      await fetch(`${apiBase}/api/moodle-sync/gdrive/folders/${encodeURIComponent(rowId)}`, {
+        method: "DELETE",
+        headers: getAuthHeaders(),
+      });
+      await loadStatus();
+      toast.success(lang === "ar" ? "تم حذف الربط" : "Removed");
+    } catch {
+      toast.error("فشل الحذف");
+    }
+  };
+
   const handleRefreshDbCache = async () => {
     setRefreshingCache(true);
     try {
@@ -275,7 +388,7 @@ export default function MoodleSyncManager({ onSynced }: { onSynced?: () => void 
 
   const cfg = data?.config;
   const isActive = cfg?.session_status === "active";
-  const anyGlobalBusy = syncing || resyncing || deduping;
+  const anyGlobalBusy = syncing || resyncing || deduping || gdSyncing;
 
   return (
     <div className="space-y-6">
@@ -543,6 +656,120 @@ export default function MoodleSyncManager({ onSynced }: { onSynced?: () => void 
               </div>
             );
           })}
+        </div>
+      </div>
+
+      {/* Google Drive 24/7 Synced Folders */}
+      <div className="glass-card p-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-bold flex items-center gap-2">
+              <FolderSync className={`w-4 h-4 text-emerald-500 ${gdSyncing ? "animate-spin" : ""}`} />
+              {lang === "ar" ? "مجلدات Google Drive المتزامنة 24/7 (تلقائياً كل 25 دقيقة)" : "24/7 Synced Google Drive Folders"}
+            </h3>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {lang === "ar"
+                ? "تسحب الملفات والمجلدات الفرعية مباشرة إلى R2 وتعمل بدون أي Session أو تسجيل دخول 24 ساعة في اليوم."
+                : "Recursively pulls public Drive folder files directly to R2 24/7 without requiring any session."}
+            </p>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={anyGlobalBusy}
+            onClick={() => handleRunGdriveSync()}
+            className="gap-1.5"
+          >
+            <Play className="w-3.5 h-3.5 text-emerald-500" />
+            {gdSyncing
+              ? (lang === "ar" ? "جاري مزامنة Drive..." : "Syncing Drive...")
+              : (lang === "ar" ? "مزامنة Google Drive الآن" : "Sync Drive Now")}
+          </Button>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {(data?.gdriveFolders || []).map((f) => {
+            const isBusyThis = busyCourseKey === `gd:${f.drive_folder_id}`;
+            return (
+              <div key={f.id} className="rounded-xl border border-border/60 bg-secondary/30 p-3.5 space-y-2">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="font-semibold text-sm truncate">{f.folder_name}</div>
+                    <div className="text-xs text-primary truncate">{f.cic_course_name}</div>
+                    <div className="text-[11px] text-muted-foreground mt-1 flex items-center gap-2 flex-wrap">
+                      <span>✅ متزامن: {f.stats.synced}</span>
+                      <span>🔗 موجود: {f.stats.linked}</span>
+                    </div>
+                    {f.last_summary && (
+                      <div className="text-[11px] text-muted-foreground/90 mt-1">{f.last_summary}</div>
+                    )}
+                  </div>
+                  <Switch
+                    checked={f.enabled}
+                    onCheckedChange={(v) => handleToggleGdriveFolder(f.id, v)}
+                  />
+                </div>
+                <div className="flex items-center gap-1.5 pt-1 border-t border-border/40">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={anyGlobalBusy || Boolean(busyCourseKey)}
+                    onClick={() => handleRunGdriveSync(f.drive_folder_id)}
+                    className="h-7 text-[11px] px-2.5"
+                  >
+                    {isBusyThis ? "..." : (lang === "ar" ? "مزامنة الآن" : "Sync Now")}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => handleDeleteGdriveFolder(f.id)}
+                    className="h-7 text-[11px] px-2 text-destructive hover:text-destructive"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Add New Public Drive Folder Form */}
+        <div className="rounded-xl border border-dashed border-border/70 bg-secondary/20 p-3.5 space-y-2.5">
+          <div className="text-xs font-semibold flex items-center gap-1.5">
+            <Plus className="w-3.5 h-3.5 text-primary" />
+            {lang === "ar" ? "إضافة مجلد Google Drive جديد للمزامنة 24/7" : "Add Public Google Drive Folder"}
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <Input
+              dir="ltr"
+              placeholder="https://drive.google.com/drive/folders/..."
+              value={newDriveUrl}
+              onChange={(e) => setNewDriveUrl(e.target.value)}
+              className="bg-background/70 text-xs"
+            />
+            <Input
+              placeholder={lang === "ar" ? "اسم المجلد (اختياري)" : "Folder label (optional)"}
+              value={newDriveName}
+              onChange={(e) => setNewDriveName(e.target.value)}
+              className="bg-background/70 text-xs"
+            />
+            <select
+              value={newDriveCourseId}
+              onChange={(e) => setNewDriveCourseId(e.target.value)}
+              className="rounded-lg bg-background/70 border border-input px-2.5 py-1.5 text-xs"
+            >
+              <option value="">{lang === "ar" ? "اختر المقرر..." : "Select course..."}</option>
+              {allCicCourses.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name} {c.code ? `(${c.code})` : ""} — س{c.academic_year}
+                </option>
+              ))}
+            </select>
+          </div>
+          <Button size="sm" onClick={handleAddGdriveFolder} disabled={addingDrive} className="h-8 text-xs gap-1.5">
+            <Plus className="w-3.5 h-3.5" />
+            {addingDrive ? "..." : (lang === "ar" ? "إضافة المجلد للمزامنة" : "Add Folder")}
+          </Button>
         </div>
       </div>
 
