@@ -15,7 +15,12 @@ import { useState, useCallback, useEffect, useMemo } from "react";
 import { cn } from "@/lib/utils";
 import { useOfflineStorage } from "@/hooks/use-offline-storage";
 import { toR2ViewUrl, toR2DownloadUrl } from "@/lib/r2";
-import { parseCloudinaryVideo, parseYouTubeUrl, isSharePointOrOneDriveUrl } from "@/lib/cloudinary";
+import {
+  parseCloudinaryVideo,
+  parseYouTubeUrl,
+  isSharePointOrOneDriveUrl,
+  buildCloudinaryDownloadUrl,
+} from "@/lib/cloudinary";
 
 interface VideoViewerModalProps {
   open: boolean;
@@ -39,6 +44,7 @@ const VideoViewerModal = ({
   const [actualVideoUrl, setActualVideoUrl] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [mediaError, setMediaError] = useState(false);
+  const [triedMp4Fallback, setTriedMp4Fallback] = useState(false);
 
   const { getCachedUrl } = useOfflineStorage();
 
@@ -65,6 +71,7 @@ const VideoViewerModal = ({
     let cancelled = false;
     let objectUrl: string | null = null;
     setMediaError(false);
+    setTriedMp4Fallback(false);
 
     if (isIframeEmbed || isSharePoint) {
       setIsLoading(false);
@@ -73,6 +80,18 @@ const VideoViewerModal = ({
     }
 
     setIsLoading(true);
+
+    const resolvePlaybackUrl = (): string => {
+      if (parsedStream.isCloudinary && parsedStream.isHls && parsedStream.mp4FallbackUrl) {
+        const supportsNativeHls =
+          typeof document !== "undefined" &&
+          Boolean(document.createElement("video").canPlayType("application/vnd.apple.mpegurl"));
+        if (!supportsNativeHls) {
+          return parsedStream.mp4FallbackUrl;
+        }
+      }
+      return toR2ViewUrl(videoUrl);
+    };
 
     const initViewer = async () => {
       try {
@@ -83,7 +102,7 @@ const VideoViewerModal = ({
           objectUrl = cachedUrl;
           setActualVideoUrl(cachedUrl);
         } else {
-          setActualVideoUrl(toR2ViewUrl(videoUrl));
+          setActualVideoUrl(resolvePlaybackUrl());
         }
 
         if ("mediaSession" in navigator) {
@@ -98,7 +117,7 @@ const VideoViewerModal = ({
         }
       } catch {
         if (!cancelled) {
-          setActualVideoUrl(toR2ViewUrl(videoUrl));
+          setActualVideoUrl(resolvePlaybackUrl());
         }
       }
     };
@@ -114,7 +133,7 @@ const VideoViewerModal = ({
         navigator.mediaSession.metadata = null;
       }
     };
-  }, [open, videoUrl, getCachedUrl, title, displayName, isIframeEmbed, isSharePoint, isYouTube, youtubeInfo, parsedStream.streamUrl]);
+  }, [open, videoUrl, getCachedUrl, title, displayName, isIframeEmbed, isSharePoint, isYouTube, youtubeInfo, parsedStream.streamUrl, parsedStream.isCloudinary, parsedStream.isHls, parsedStream.mp4FallbackUrl]);
 
   const rawBaseName = title || displayName || "video";
   const fileName = isAudio
@@ -134,6 +153,20 @@ const VideoViewerModal = ({
   const handleDownload = useCallback(async () => {
     playClickSfx();
     try {
+      // Stream-download directly from Cloudinary CDN using fl_attachment (zero browser RAM buffering!)
+      const cldDownloadUrl = buildCloudinaryDownloadUrl(videoUrl);
+      if (cldDownloadUrl) {
+        const a = document.createElement("a");
+        a.href = cldDownloadUrl;
+        a.download = fileName;
+        a.rel = "noopener noreferrer";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        toast.success(t("material.downloadSuccess"), { id: "dl-viewer" });
+        return;
+      }
+
       toast.loading(t("material.downloading"), { id: "dl-viewer" });
       const dlTarget = toR2DownloadUrl(videoUrl, fileName);
       const res = await fetch(dlTarget);
@@ -340,6 +373,7 @@ const VideoViewerModal = ({
                 <video
                   key={actualVideoUrl}
                   src={actualVideoUrl}
+                  poster={parsedStream.posterUrl || undefined}
                   controls
                   autoPlay
                   playsInline
@@ -351,6 +385,21 @@ const VideoViewerModal = ({
                   onWaiting={() => setIsLoading(true)}
                   onPlaying={() => setIsLoading(false)}
                   onError={() => {
+                    // For Cloudinary non-native containers (e.g. .mkv / .mov / .avi), auto-retry with Cloudinary MP4 transcode once
+                    if (
+                      !triedMp4Fallback &&
+                      parsedStream.isCloudinary &&
+                      parsedStream.cloudName &&
+                      parsedStream.publicId
+                    ) {
+                      const mp4Url = `https://res.cloudinary.com/${encodeURIComponent(parsedStream.cloudName)}/video/upload/f_mp4,q_auto/${parsedStream.publicId}.mp4`;
+                      if (mp4Url !== actualVideoUrl) {
+                        setTriedMp4Fallback(true);
+                        setIsLoading(true);
+                        setActualVideoUrl(mp4Url);
+                        return;
+                      }
+                    }
                     setIsLoading(false);
                     setMediaError(true);
                   }}

@@ -248,3 +248,17 @@ CREATE TABLE IF NOT EXISTS gdrive_sync_items (
 );
 
 CREATE INDEX IF NOT EXISTS idx_gdrive_sync_items_folder ON gdrive_sync_items(drive_folder_id, drive_file_id);
+
+-- ============ CLOUDINARY CDN VIDEO UPLOAD CONFIG ============
+CREATE TABLE IF NOT EXISTS cloudinary_config (
+  id TEXT PRIMARY KEY,
+  cloud_name TEXT,
+  upload_mode TEXT NOT NULL DEFAULT 'signed',
+  upload_preset TEXT,
+  api_key TEXT,
+  api_secret TEXT,
+  folder TEXT NOT NULL DEFAULT 'cic-cloud/lectures',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  auto_route_videos INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT DEFAULT (datetime('now'))
+);

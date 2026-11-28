@@ -23,6 +23,8 @@ import {
   Radio,
   CheckCircle2,
   AlertCircle,
+  Cloud,
+  Loader2,
 } from "lucide-react";
 import type { Material, MaterialCategory, Course } from "@/lib/store";
 import { db } from "@/lib/store";
@@ -48,6 +50,7 @@ import {
   isYouTubeUrl,
   parseCloudinaryVideo,
   parseYouTubeUrl,
+  uploadVideoToCloudinary,
 } from "@/lib/cloudinary";
 
 const PdfViewerModal = lazy(() => import("@/components/PdfViewerModal"));
@@ -163,7 +166,36 @@ const MaterialCard = ({
   const [editListContent, setEditListContent] = useState(material.list_content || "");
   const [editSectionNumber, setEditSectionNumber] = useState(material.section_number || "all");
   const [editNotes, setEditNotes] = useState(material.notes || "");
+  const [editCldUploading, setEditCldUploading] = useState(false);
+  const [editCldProgress, setEditCldProgress] = useState(0);
   const [isExpanded, setIsExpanded] = useState(false);
+
+  const handleEditCloudinaryUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setEditCldUploading(true);
+    setEditCldProgress(0);
+    const courseObj = courses.find((c) => c.id === editCourseId);
+    const subfolder = courseObj?.code?.replace(/[^A-Za-z0-9_-]/g, "") || undefined;
+    try {
+      const res = await uploadVideoToCloudinary(file, {
+        subfolder,
+        onProgress: (pct) => setEditCldProgress(pct),
+      });
+      setEditVideoUrl(res.secureUrl);
+      toast.success(
+        lang === "ar"
+          ? "تم رفع الفيديو على Cloudinary CDN ووضع الرابط ✅ اضغط «حفظ التعديلات»"
+          : "Uploaded to Cloudinary CDN ✅ Click Save Changes"
+      );
+    } catch (err: any) {
+      toast.error(err?.message || (lang === "ar" ? "فشل رفع الفيديو على Cloudinary" : "Cloudinary upload failed"));
+    } finally {
+      setEditCldUploading(false);
+      setEditCldProgress(0);
+    }
+  };
 
   const editVideoValidation = useMemo(() => {
     if (!editVideoUrl.trim()) return null;
@@ -1202,18 +1234,71 @@ const MaterialCard = ({
                 )}
 
                 {/* Cloudinary CDN Stream URL field */}
-                <div className="p-3 rounded-xl bg-indigo-500/[0.06] border border-indigo-500/20 space-y-1.5">
+                <div className="p-3 rounded-xl bg-indigo-500/[0.06] border border-indigo-500/20 space-y-2">
                   <label className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 flex items-center gap-1.5">
                     <Radio className="w-3.5 h-3.5" />
                     {t("admin.cloudinaryUrl")}
                   </label>
-                  <Input
-                    value={editVideoUrl}
-                    onChange={(e) => setEditVideoUrl(e.target.value)}
-                    placeholder={t("admin.cloudinaryPlaceholder")}
-                    className="bg-background/80 text-xs font-mono"
-                    dir="ltr"
-                  />
+                  <div className="flex items-center gap-1.5">
+                    <Input
+                      value={editVideoUrl}
+                      onChange={(e) => setEditVideoUrl(e.target.value)}
+                      placeholder={t("admin.cloudinaryPlaceholder")}
+                      className="bg-background/80 text-xs font-mono"
+                      dir="ltr"
+                    />
+                    {editVideoUrl.trim() && (
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="outline"
+                        className="h-9 w-9 shrink-0"
+                        title={lang === "ar" ? "نسخ الرابط" : "Copy link"}
+                        onClick={() => {
+                          navigator.clipboard.writeText(editVideoUrl.trim()).then(() =>
+                            toast.success(lang === "ar" ? "تم نسخ الرابط ✅" : "Link copied ✅")
+                          );
+                        }}
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                      </Button>
+                    )}
+                  </div>
+                  <div>
+                    <input
+                      id={`edit-cld-video-${material.id}`}
+                      type="file"
+                      accept="video/*,audio/*,.mp4,.webm,.mov,.mkv,.avi,.mp3,.m4a,.wav"
+                      className="hidden"
+                      disabled={editCldUploading || saving}
+                      onChange={handleEditCloudinaryUpload}
+                    />
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={editCldUploading || saving}
+                      onClick={() => document.getElementById(`edit-cld-video-${material.id}`)?.click()}
+                      className="w-full h-8 text-xs gap-1.5 bg-background/80 border-indigo-500/30 hover:bg-indigo-500/10 text-indigo-600 dark:text-indigo-300"
+                    >
+                      {editCldUploading ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Cloud className="w-3.5 h-3.5" />
+                      )}
+                      {editCldUploading
+                        ? `${lang === "ar" ? "جاري الرفع على Cloudinary..." : "Uploading..."} ${editCldProgress}%`
+                        : (lang === "ar" ? "رفع فيديو على Cloudinary CDN واستبدال الرابط" : "Upload video to Cloudinary CDN")}
+                    </Button>
+                    {editCldUploading && (
+                      <div className="w-full bg-secondary rounded-full h-1.5 overflow-hidden mt-1.5">
+                        <div
+                          className="h-full bg-indigo-500 transition-all duration-200 rounded-full"
+                          style={{ width: `${editCldProgress}%` }}
+                        />
+                      </div>
+                    )}
+                  </div>
                   {editVideoValidation && (
                     <div
                       className={`flex items-center gap-1.5 text-[11px] font-medium ${

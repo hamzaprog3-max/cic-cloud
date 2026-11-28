@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import MaterialCard from "@/components/MaterialCard";
-import { LogOut, Plus, Bell, Link2, Upload, Trash2, BookPlus, Users, Layers, FolderUp, Sparkles, KeyRound } from "lucide-react";
+import { LogOut, Plus, Bell, Link2, Upload, Trash2, BookPlus, Users, Layers, FolderUp, Sparkles, KeyRound, Cloud, Copy, Loader2, CheckCircle2, AlertCircle, X } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import ManageModerators from "@/components/admin/ManageModerators";
@@ -20,10 +20,18 @@ import AnnouncementManager from "@/components/admin/AnnouncementManager";
 import NotificationTemplateManager from "@/components/admin/NotificationTemplateManager";
 import { ScheduleManager } from "@/components/admin/ScheduleManager";
 import { AiProvidersManagerModal } from "@/components/admin/AiProvidersManagerModal";
+import { CloudinaryManagerModal } from "@/components/admin/CloudinaryManagerModal";
 import MoodleSyncManager from "@/components/admin/MoodleSyncManager";
 import AuditLog from "./AuditLog";
 import { ShieldAlert, Megaphone, Calendar, RefreshCw } from "lucide-react";
 import { yearLabel } from "@/lib/year-context";
+import {
+  getCloudinaryConfig,
+  uploadVideoToCloudinary,
+  isVideoOrAudioFile,
+  parseCloudinaryVideo,
+  type CloudinaryConfigStatus,
+} from "@/lib/cloudinary";
 import {
   DndContext,
   closestCenter,
@@ -94,6 +102,12 @@ const AdminDashboard = () => {
   const [yearFilter, setYearFilter] = useState<string>("all");
   const [semesterFilter, setSemesterFilter] = useState<string>("all");
   const [showAiKeyDialog, setShowAiKeyDialog] = useState(false);
+  const [showCloudinaryDialog, setShowCloudinaryDialog] = useState(false);
+  const [cloudinaryDialogTab, setCloudinaryDialogTab] = useState<"settings" | "upload">("settings");
+  const [cloudinaryConfig, setCloudinaryConfig] = useState<CloudinaryConfigStatus | null>(null);
+  const [cloudinaryUploading, setCloudinaryUploading] = useState(false);
+  const [cloudinaryProgress, setCloudinaryProgress] = useState(0);
+  const [cloudinaryAbort, setCloudinaryAbort] = useState<AbortController | null>(null);
   const [showOwnerPwdDialog, setShowOwnerPwdDialog] = useState(false);
   const [newOwnerPassword, setNewOwnerPassword] = useState("");
   const [confirmOwnerPassword, setConfirmOwnerPassword] = useState("");
@@ -166,6 +180,14 @@ const AdminDashboard = () => {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  // Fetch Cloudinary CDN configuration status (safe metadata for owner & moderators)
+  useEffect(() => {
+    if (!user.role) return;
+    getCloudinaryConfig()
+      .then((cfg) => setCloudinaryConfig(cfg))
+      .catch(() => {});
+  }, [user.role]);
 
   // Session guard: the backend JWT expires long before the localStorage flag,
   // which otherwise surfaces as "row-level security policy" errors on save.
@@ -323,6 +345,63 @@ const AdminDashboard = () => {
     }
   }, [semesterFilter, yearFilter, deptFilter, filteredCourses, courseId, materialCourseFilter]);
 
+  const cloudinaryReady = Boolean(cloudinaryConfig?.configured && cloudinaryConfig?.enabled);
+  const videoUrlValidation = videoUrl.trim()
+    ? parseCloudinaryVideo(videoUrl, { requireCloudinary: false, allowYouTube: true, allowSharePoint: true })
+    : null;
+
+  const handleDirectCloudinaryVideoPick = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+
+    if (!navigator.onLine) {
+      toast.error(lang === "ar" ? "لا يوجد اتصال بالإنترنت!" : "No internet connection!");
+      return;
+    }
+
+    if (!cloudinaryReady) {
+      if (isOwner) {
+        setCloudinaryDialogTab("settings");
+        setShowCloudinaryDialog(true);
+        toast.info(lang === "ar" ? "اربط حساب Cloudinary أولاً للبدء برفع الفيديوهات" : "Connect your Cloudinary account first");
+      } else {
+        toast.error(lang === "ar" ? "خدمة Cloudinary CDN غير مفعّلة بعد — تواصل مع المالك" : "Cloudinary CDN is not configured yet");
+      }
+      return;
+    }
+
+    const controller = new AbortController();
+    setCloudinaryAbort(controller);
+    setCloudinaryUploading(true);
+    setCloudinaryProgress(0);
+    const selectedCourse = courses.find((c) => c.id === courseId);
+    const subfolder = selectedCourse?.code?.replace(/[^A-Za-z0-9_-]/g, "") || undefined;
+
+    try {
+      const result = await uploadVideoToCloudinary(file, {
+        subfolder,
+        onProgress: (pct) => setCloudinaryProgress(pct),
+        signal: controller.signal,
+      });
+      setVideoUrl(result.secureUrl);
+      if (!title.trim()) {
+        setTitle(file.name.replace(/\.[^.]+$/, ""));
+      }
+      toast.success(
+        lang === "ar"
+          ? "تم رفع الفيديو على Cloudinary CDN ووضع الرابط تلقائياً ✅ (سيُحفظ كرابط فقط)"
+          : "Uploaded to Cloudinary CDN & link filled ✅ (saved as link only)"
+      );
+    } catch (err: any) {
+      toast.error(err?.message || (lang === "ar" ? "فشل رفع الفيديو على Cloudinary" : "Cloudinary upload failed"));
+    } finally {
+      setCloudinaryUploading(false);
+      setCloudinaryProgress(0);
+      setCloudinaryAbort(null);
+    }
+  };
+
   const handleUpload = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title || !courseId) { toast.error(t("admin.titleAndCourseReq")); return; }
@@ -340,8 +419,27 @@ const AdminDashboard = () => {
     setUploadProgress(0);
     try {
       let pdfUrl: string | null = null;
+      let finalVideoUrl: string | null = videoUrl.trim() || null;
+
       if (pdfMode === "upload" && pdfFile) {
-        pdfUrl = await db.uploadPdf(pdfFile, (pct) => setUploadProgress(pct));
+        const shouldAutoRouteCloudinary =
+          cloudinaryReady &&
+          Boolean(cloudinaryConfig?.auto_route_videos) &&
+          isVideoOrAudioFile(pdfFile) &&
+          !finalVideoUrl;
+
+        if (shouldAutoRouteCloudinary) {
+          const selectedCourse = courses.find((c) => c.id === courseId);
+          const subfolder = selectedCourse?.code?.replace(/[^A-Za-z0-9_-]/g, "") || undefined;
+          const cld = await uploadVideoToCloudinary(pdfFile, {
+            subfolder,
+            onProgress: (pct) => setUploadProgress(pct),
+          });
+          finalVideoUrl = cld.secureUrl;
+          pdfUrl = null;
+        } else {
+          pdfUrl = await db.uploadPdf(pdfFile, (pct) => setUploadProgress(pct));
+        }
       } else if (pdfMode === "url" && pdfExternalUrl) {
         pdfUrl = pdfExternalUrl;
       }
@@ -353,7 +451,7 @@ const AdminDashboard = () => {
         category_id: categoryId || null,
         pdf_url: pdfUrl,
         pdf_display_name: pdfDisplayName || null,
-        video_url: videoUrl.trim() || null,
+        video_url: finalVideoUrl,
         external_link: isPdfOnly ? null : (externalLink || null),
         submission_link: isAssignment ? (submissionLink || null) : null,
         deadline: isAssignmentOpenEnded ? null : (deadline || null),
@@ -497,17 +595,31 @@ const AdminDashboard = () => {
       const friendlyTitle = originalName.replace(/\.(pdf|mp4|webm|mkv|avi|mov|mp3|wav|m4a|aac|ogg)$/i, "");
 
       try {
-        // Upload with sanitized storage path
-        const pdfUrl = await db.uploadPdfSanitized(file);
+        const shouldRouteToCloudinary =
+          cloudinaryReady && Boolean(cloudinaryConfig?.auto_route_videos) && isVideoOrAudioFile(file);
 
-        // Insert into materials table
+        let pdfUrl: string | null = null;
+        let bulkVideoUrl: string | null = null;
+
+        if (shouldRouteToCloudinary) {
+          const selectedCourse = courses.find((c) => c.id === courseId);
+          const subfolder = selectedCourse?.code?.replace(/[^A-Za-z0-9_-]/g, "") || undefined;
+          const cld = await uploadVideoToCloudinary(file, { subfolder });
+          bulkVideoUrl = cld.secureUrl;
+        } else {
+          // Upload with sanitized storage path
+          pdfUrl = await db.uploadPdfSanitized(file);
+        }
+
+        // Insert into materials table (videos store ONLY the Cloudinary CDN link!)
         await db.addMaterial({
           title: friendlyTitle,
           course_id: courseId,
           type: "lecture",
           category_id: categoryId || null,
           pdf_url: pdfUrl,
-          pdf_display_name: friendlyTitle,
+          pdf_display_name: pdfUrl ? friendlyTitle : null,
+          video_url: bulkVideoUrl,
           external_link: null,
           submission_link: null,
           deadline: null,
@@ -745,6 +857,23 @@ const AdminDashboard = () => {
                 <Button
                   variant="outline"
                   size="sm"
+                  onClick={() => {
+                    setCloudinaryDialogTab("settings");
+                    setShowCloudinaryDialog(true);
+                  }}
+                  className="gap-1.5 text-xs bg-indigo-500/10 hover:bg-indigo-500/20 border-indigo-500/30 text-indigo-600 dark:text-indigo-300 font-semibold"
+                >
+                  <Cloud className="w-3.5 h-3.5" />
+                  {lang === "ar" ? "Cloudinary CDN" : "Cloudinary CDN"}
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      cloudinaryReady ? "bg-emerald-500" : "bg-amber-500"
+                    }`}
+                  />
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
                   onClick={() => setShowAiKeyDialog(true)}
                   className="gap-1.5 text-xs bg-secondary/50 hover:bg-secondary border-border/60 font-semibold"
                 >
@@ -968,7 +1097,17 @@ const AdminDashboard = () => {
                       ) : pdfMode === "upload" ? (
                         <div className="space-y-1">
                           <Input id="pdf-upload" type="file" accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.png,.jpg,.jpeg,.webp,video/*,audio/*" onChange={e => setPdfFile(e.target.files?.[0] || null)} className="bg-secondary/50" />
-                          {pdfFile && <p className="text-xs text-primary">{pdfFile.name}</p>}
+                          {pdfFile && (
+                            <p className="text-xs text-primary truncate">{pdfFile.name}</p>
+                          )}
+                          {pdfFile && cloudinaryReady && cloudinaryConfig?.auto_route_videos && isVideoOrAudioFile(pdfFile) && !videoUrl.trim() && (
+                            <p className="text-[11px] text-indigo-600 dark:text-indigo-400 flex items-center gap-1 font-medium">
+                              <Cloud className="w-3.5 h-3.5 shrink-0" />
+                              {lang === "ar"
+                                ? "سيتم رفع الفيديو تلقائياً على Cloudinary CDN وحفظ الرابط فقط (0 بايت على R2)"
+                                : "Video will auto-upload to Cloudinary CDN and save link only (0 bytes in R2)"}
+                            </p>
+                          )}
                           {uploading && uploadProgress > 0 && (
                             <div className="w-full bg-secondary rounded-full h-1.5 overflow-hidden mt-1">
                               <div className="h-full bg-primary transition-all duration-200" style={{ width: `${uploadProgress}%` }} />
@@ -981,16 +1120,132 @@ const AdminDashboard = () => {
                       {!isFolderMode && (
                         <>
                           <Input placeholder={t("admin.pdfDisplayName")} value={pdfDisplayName} onChange={e => setPdfDisplayName(e.target.value)} className="bg-secondary/50" />
-                          <div className="space-y-1 pt-1">
-                            <label className="text-xs font-semibold text-primary flex items-center gap-1.5">
-                              <span>🎥</span> {lang === "ar" ? "رابط تسجيل المحاضرة / فيديو (اختياري):" : "Lecture Recording / Video URL (optional):"}
-                            </label>
-                            <Input
-                              placeholder={lang === "ar" ? "رابط Cloudinary أو Teams أو YouTube أو SharePoint للتسجيل" : "Cloudinary, Teams, YouTube, or SharePoint recording link"}
-                              value={videoUrl}
-                              onChange={e => setVideoUrl(e.target.value)}
-                              className="bg-secondary/50 text-xs"
-                            />
+                          <div className="p-3 rounded-xl bg-indigo-500/[0.06] border border-indigo-500/20 space-y-2 mt-1">
+                            <div className="flex items-center justify-between gap-2">
+                              <label className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 flex items-center gap-1.5">
+                                <span>🎥</span> {lang === "ar" ? "فيديو المحاضرة (رابط فقط — Cloudinary CDN):" : "Lecture Video (Link Only — Cloudinary CDN):"}
+                              </label>
+                              {isOwner && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setCloudinaryDialogTab(cloudinaryReady ? "upload" : "settings");
+                                    setShowCloudinaryDialog(true);
+                                  }}
+                                  className="text-[10px] font-semibold text-indigo-500 hover:underline shrink-0"
+                                >
+                                  {cloudinaryReady
+                                    ? (lang === "ar" ? "إدارة CDN" : "Manage CDN")
+                                    : (lang === "ar" ? "إعداد Cloudinary" : "Setup")}
+                                </button>
+                              )}
+                            </div>
+
+                            <div className="flex items-center gap-1.5">
+                              <Input
+                                placeholder={lang === "ar" ? "رابط Cloudinary أو YouTube أو Teams للتسجيل" : "Cloudinary, YouTube, or Teams recording link"}
+                                value={videoUrl}
+                                onChange={e => setVideoUrl(e.target.value)}
+                                className="bg-background/80 text-xs font-mono"
+                                dir="ltr"
+                              />
+                              {videoUrl.trim() && (
+                                <Button
+                                  type="button"
+                                  size="icon"
+                                  variant="outline"
+                                  className="h-9 w-9 shrink-0"
+                                  title={lang === "ar" ? "نسخ الرابط" : "Copy URL"}
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(videoUrl.trim()).then(() =>
+                                      toast.success(lang === "ar" ? "تم نسخ رابط الفيديو ✅" : "Video link copied ✅")
+                                    );
+                                  }}
+                                >
+                                  <Copy className="w-3.5 h-3.5" />
+                                </Button>
+                              )}
+                            </div>
+
+                            {videoUrlValidation && (
+                              <div
+                                className={`flex items-center gap-1.5 text-[11px] font-medium ${
+                                  videoUrlValidation.isValid ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"
+                                }`}
+                              >
+                                {videoUrlValidation.isValid ? (
+                                  <>
+                                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                                    <span>{videoUrlValidation.streamTypeLabel[lang === "ar" ? "ar" : "en"]}</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                                    <span>{videoUrlValidation.error}</span>
+                                  </>
+                                )}
+                              </div>
+                            )}
+
+                            {/* Direct Cloudinary CDN video upload button */}
+                            <div className="space-y-1.5">
+                              <input
+                                id="cloudinary-direct-video-input"
+                                type="file"
+                                accept="video/*,audio/*,.mp4,.webm,.mov,.mkv,.avi,.mp3,.m4a,.wav"
+                                className="hidden"
+                                disabled={cloudinaryUploading || uploading}
+                                onChange={handleDirectCloudinaryVideoPick}
+                              />
+                              <div className="flex items-center gap-1.5">
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={cloudinaryUploading || uploading}
+                                  onClick={() => {
+                                    if (!cloudinaryReady && isOwner) {
+                                      setCloudinaryDialogTab("settings");
+                                      setShowCloudinaryDialog(true);
+                                      return;
+                                    }
+                                    document.getElementById("cloudinary-direct-video-input")?.click();
+                                  }}
+                                  className="flex-1 h-8 text-xs gap-1.5 bg-background/80 border-indigo-500/30 hover:bg-indigo-500/10 text-indigo-600 dark:text-indigo-300"
+                                >
+                                  {cloudinaryUploading ? (
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  ) : (
+                                    <Cloud className="w-3.5 h-3.5" />
+                                  )}
+                                  {cloudinaryUploading
+                                    ? `${lang === "ar" ? "جاري الرفع على Cloudinary..." : "Uploading..."} ${cloudinaryProgress}%`
+                                    : cloudinaryReady
+                                      ? (lang === "ar" ? "رفع فيديو على Cloudinary وأخذ الرابط تلقائياً" : "Upload video to Cloudinary CDN")
+                                      : (lang === "ar" ? "ربط حساب Cloudinary لرفع الفيديوهات" : "Connect Cloudinary CDN")}
+                                </Button>
+                                {cloudinaryUploading && cloudinaryAbort && (
+                                  <Button
+                                    type="button"
+                                    size="icon"
+                                    variant="destructive"
+                                    className="h-8 w-8 shrink-0"
+                                    onClick={() => cloudinaryAbort.abort()}
+                                    title={lang === "ar" ? "إلغاء الرفع" : "Cancel upload"}
+                                  >
+                                    <X className="w-3.5 h-3.5" />
+                                  </Button>
+                                )}
+                              </div>
+                              {cloudinaryUploading && (
+                                <div className="w-full bg-secondary rounded-full h-1.5 overflow-hidden">
+                                  <div
+                                    className="h-full bg-indigo-500 transition-all duration-200 rounded-full"
+                                    style={{ width: `${cloudinaryProgress}%` }}
+                                  />
+                                </div>
+                              )}
+                            </div>
                           </div>
                         </>
                       )}
@@ -1224,6 +1479,26 @@ const AdminDashboard = () => {
         <AiProvidersManagerModal
           open={showAiKeyDialog}
           onOpenChange={setShowAiKeyDialog}
+        />
+      )}
+
+      {/* Cloudinary CDN Video Hosting Manager Dialog */}
+      {showCloudinaryDialog && (
+        <CloudinaryManagerModal
+          open={showCloudinaryDialog}
+          onOpenChange={setShowCloudinaryDialog}
+          initialTab={cloudinaryDialogTab}
+          onSaved={(cfg) => setCloudinaryConfig(cfg)}
+          onUseVideoUrl={(url, suggestedTitle) => {
+            setActiveSection("materials");
+            setVideoUrl(url);
+            if (!title.trim() && suggestedTitle) setTitle(suggestedTitle);
+            toast.success(
+              lang === "ar"
+                ? "تم إدراج رابط Cloudinary CDN في نموذج المادة ✅"
+                : "Cloudinary CDN link inserted into form ✅"
+            );
+          }}
         />
       )}
 

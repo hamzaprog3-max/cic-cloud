@@ -107,6 +107,11 @@ export interface Env {
   VITE_MISTRAL_API_KEY?: string;
   GITHUB_TOKEN?: string;
   VITE_GITHUB_TOKEN?: string;
+  CLOUDINARY_CLOUD_NAME?: string;
+  CLOUDINARY_API_KEY?: string;
+  CLOUDINARY_API_SECRET?: string;
+  CLOUDINARY_UPLOAD_PRESET?: string;
+  CLOUDINARY_FOLDER?: string;
 }
 
 interface TokenClaims {
@@ -1558,6 +1563,434 @@ async function handleMoodleSyncRequest(request: Request, url: URL, env: Env): Pr
   }
 }
 
+// ============ CLOUDINARY CDN VIDEO UPLOAD API ============
+let cloudinaryTableReady = false;
+
+async function ensureCloudinaryTable(env: Env): Promise<void> {
+  if (cloudinaryTableReady) return;
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS cloudinary_config (
+      id TEXT PRIMARY KEY,
+      cloud_name TEXT,
+      upload_mode TEXT NOT NULL DEFAULT 'signed',
+      upload_preset TEXT,
+      api_key TEXT,
+      api_secret TEXT,
+      folder TEXT NOT NULL DEFAULT 'cic-cloud/lectures',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      auto_route_videos INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT DEFAULT (datetime('now'))
+    )`
+  ).run();
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO cloudinary_config (id, upload_mode, folder, enabled, auto_route_videos)
+     VALUES ('default', 'signed', 'cic-cloud/lectures', 1, 1)`
+  ).run();
+  cloudinaryTableReady = true;
+}
+
+function sanitizeCloudName(raw?: string | null): string {
+  const cleaned = String(raw || "").trim();
+  return /^[a-z0-9_-]{2,64}$/i.test(cleaned) ? cleaned : "";
+}
+
+function sanitizeCloudinaryFolder(raw?: string | null): string {
+  const cleaned = String(raw || "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/[^A-Za-z0-9/_-]/g, "-")
+    .replace(/\/+/g, "/")
+    .replace(/^\/+|\/+$/g, "")
+    .slice(0, 120);
+  return cleaned;
+}
+
+async function sha1Hex(message: string): Promise<string> {
+  const bytes = new TextEncoder().encode(message);
+  const digest = await crypto.subtle.digest("SHA-1", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+interface ResolvedCloudinaryConfig {
+  cloud_name: string;
+  upload_mode: "signed" | "unsigned";
+  effective_mode: "signed" | "unsigned" | "unconfigured";
+  upload_preset: string;
+  api_key: string;
+  api_secret: string;
+  folder: string;
+  enabled: boolean;
+  auto_route_videos: boolean;
+  configured: boolean;
+  updated_at: string | null;
+}
+
+async function loadCloudinaryConfig(env: Env): Promise<ResolvedCloudinaryConfig> {
+  await ensureCloudinaryTable(env);
+  const row = await env.DB.prepare("SELECT * FROM cloudinary_config WHERE id = 'default'").first<Record<string, any>>();
+
+  const cloud_name = sanitizeCloudName(row?.cloud_name || env.CLOUDINARY_CLOUD_NAME || "");
+  const upload_mode: "signed" | "unsigned" = row?.upload_mode === "unsigned" ? "unsigned" : "signed";
+  const upload_preset = String(row?.upload_preset || env.CLOUDINARY_UPLOAD_PRESET || "").trim();
+  const api_key = String(row?.api_key || env.CLOUDINARY_API_KEY || "").trim();
+  const api_secret = String(row?.api_secret || env.CLOUDINARY_API_SECRET || "").trim();
+  const folder = sanitizeCloudinaryFolder(row?.folder ?? env.CLOUDINARY_FOLDER ?? "cic-cloud/lectures");
+  const enabled = row ? Boolean(row.enabled) : true;
+  const auto_route_videos = row ? Boolean(row.auto_route_videos) : true;
+
+  let effective_mode: "signed" | "unsigned" | "unconfigured" = "unconfigured";
+  if (upload_mode === "unsigned" && upload_preset) {
+    effective_mode = "unsigned";
+  } else if (api_key && api_secret) {
+    effective_mode = "signed";
+  } else if (upload_preset) {
+    effective_mode = "unsigned";
+  }
+
+  return {
+    cloud_name,
+    upload_mode,
+    effective_mode,
+    upload_preset,
+    api_key,
+    api_secret,
+    folder,
+    enabled,
+    auto_route_videos,
+    configured: Boolean(cloud_name && effective_mode !== "unconfigured"),
+    updated_at: row?.updated_at ? String(row.updated_at) : null,
+  };
+}
+
+function serializeCloudinaryConfig(cfg: ResolvedCloudinaryConfig, isOwner: boolean) {
+  const maskedSecret = cfg.api_secret
+    ? `••••••${cfg.api_secret.slice(-4)}`
+    : "";
+  return {
+    configured: cfg.configured,
+    enabled: cfg.enabled,
+    auto_route_videos: cfg.auto_route_videos,
+    upload_mode: cfg.upload_mode,
+    effective_mode: cfg.effective_mode,
+    cloud_name: cfg.cloud_name,
+    upload_preset: isOwner ? cfg.upload_preset : "",
+    api_key: isOwner ? cfg.api_key : "",
+    has_api_secret: Boolean(cfg.api_secret),
+    masked_api_secret: isOwner ? maskedSecret : "",
+    folder: cfg.folder,
+    updated_at: cfg.updated_at,
+  };
+}
+
+async function fetchCloudinaryUsage(cloudName: string, apiKey: string, apiSecret: string) {
+  const auth = btoa(`${apiKey}:${apiSecret}`);
+  const res = await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(cloudName)}/usage`, {
+    method: "GET",
+    headers: {
+      Authorization: `Basic ${auth}`,
+      Accept: "application/json",
+    },
+  });
+  const data = (await res.json().catch(() => null)) as any;
+  if (!res.ok) {
+    const errMsg = data?.error?.message || `HTTP ${res.status}`;
+    return { ok: false as const, status: res.status, error: errMsg };
+  }
+  return {
+    ok: true as const,
+    usage: {
+      plan: String(data?.plan || "Free"),
+      last_updated: data?.last_updated || null,
+      credits: data?.credits
+        ? {
+            usage: Number(data.credits.usage || 0),
+            limit: Number(data.credits.limit || 25),
+            used_percent: Number(data.credits.used_percent || 0),
+          }
+        : null,
+      storage: data?.storage
+        ? {
+            usage: Number(data.storage.usage || 0),
+            credits_usage: Number(data.storage.credits_usage || 0),
+          }
+        : null,
+      bandwidth: data?.bandwidth
+        ? {
+            usage: Number(data.bandwidth.usage || 0),
+            credits_usage: Number(data.bandwidth.credits_usage || 0),
+          }
+        : null,
+      resources: Number(data?.resources || 0),
+      derived_resources: Number(data?.derived_resources || 0),
+    },
+  };
+}
+
+async function handleCloudinaryRequest(request: Request, url: URL, env: Env): Promise<Response> {
+  const claims = await verifyToken(request, env);
+  if (!claims) {
+    return jsonResponse({ error: "غير مصرح — يرجى تسجيل الدخول" }, 401, request);
+  }
+
+  const subPath = url.pathname.replace(/^\/api\/cloudinary\/?/, "");
+  const method = request.method;
+  const isOwner = claims.role === "owner";
+
+  try {
+    if (subPath === "config" && method === "GET") {
+      const cfg = await loadCloudinaryConfig(env);
+      return jsonResponse(serializeCloudinaryConfig(cfg, isOwner), 200, request);
+    }
+
+    if (subPath === "config" && method === "POST") {
+      if (!isOwner) {
+        return jsonResponse({ error: "صلاحية المالك مطلوبة لتعديل إعدادات Cloudinary" }, 403, request);
+      }
+      await ensureCloudinaryTable(env);
+      const body = (await request.json().catch(() => null)) as {
+        cloud_name?: string;
+        upload_mode?: "signed" | "unsigned";
+        upload_preset?: string;
+        api_key?: string;
+        api_secret?: string;
+        clear_api_secret?: boolean;
+        folder?: string;
+        enabled?: boolean;
+        auto_route_videos?: boolean;
+      } | null;
+      if (!body) return jsonResponse({ error: "Invalid JSON" }, 400, request);
+
+      const fields: string[] = [];
+      const vals: unknown[] = [];
+
+      if (typeof body.cloud_name === "string") {
+        const trimmed = body.cloud_name.trim();
+        if (trimmed && !sanitizeCloudName(trimmed)) {
+          return jsonResponse({ error: "اسم السحابة (Cloud Name) غير صالح — يجب أن يحتوي على حروف وأرقام إنجليزية فقط" }, 400, request);
+        }
+        fields.push("cloud_name = ?");
+        vals.push(trimmed || null);
+      }
+      if (body.upload_mode === "signed" || body.upload_mode === "unsigned") {
+        fields.push("upload_mode = ?");
+        vals.push(body.upload_mode);
+      }
+      if (typeof body.upload_preset === "string") {
+        fields.push("upload_preset = ?");
+        vals.push(body.upload_preset.trim() || null);
+      }
+      if (typeof body.api_key === "string") {
+        fields.push("api_key = ?");
+        vals.push(body.api_key.trim() || null);
+      }
+      if (body.clear_api_secret) {
+        fields.push("api_secret = NULL");
+      } else if (typeof body.api_secret === "string" && body.api_secret.trim()) {
+        fields.push("api_secret = ?");
+        vals.push(body.api_secret.trim());
+      }
+      if (typeof body.folder === "string") {
+        fields.push("folder = ?");
+        vals.push(sanitizeCloudinaryFolder(body.folder) || "cic-cloud/lectures");
+      }
+      if (typeof body.enabled === "boolean") {
+        fields.push("enabled = ?");
+        vals.push(body.enabled ? 1 : 0);
+      }
+      if (typeof body.auto_route_videos === "boolean") {
+        fields.push("auto_route_videos = ?");
+        vals.push(body.auto_route_videos ? 1 : 0);
+      }
+
+      if (fields.length > 0) {
+        fields.push("updated_at = ?");
+        vals.push(new Date().toISOString());
+        await env.DB.prepare(`UPDATE cloudinary_config SET ${fields.join(", ")} WHERE id = 'default'`)
+          .bind(...vals)
+          .run();
+      }
+
+      const updated = await loadCloudinaryConfig(env);
+      return jsonResponse({ ok: true, config: serializeCloudinaryConfig(updated, true) }, 200, request);
+    }
+
+    if (subPath === "sign" && method === "POST") {
+      const cfg = await loadCloudinaryConfig(env);
+      if (!cfg.configured) {
+        return jsonResponse(
+          { error: "لم يتم إعداد Cloudinary CDN بعد. افتح «إعدادات Cloudinary CDN» في لوحة التحكم وأضف Cloud Name وبيانات الربط." },
+          400,
+          request
+        );
+      }
+      if (!cfg.enabled) {
+        return jsonResponse(
+          { error: "تم إيقاف الرفع على Cloudinary CDN مؤقتاً من الإعدادات." },
+          400,
+          request
+        );
+      }
+
+      const body = (await request.json().catch(() => ({}))) as { folder?: string; subfolder?: string } | null;
+      const baseFolder = cfg.folder || "cic-cloud/lectures";
+      const sub = sanitizeCloudinaryFolder(body?.subfolder);
+      const overrideFolder = sanitizeCloudinaryFolder(body?.folder);
+      const finalFolder = overrideFolder || (sub ? `${baseFolder}/${sub}` : baseFolder);
+      const uploadUrl = `https://api.cloudinary.com/v1_1/${encodeURIComponent(cfg.cloud_name)}/video/upload`;
+
+      if (cfg.effective_mode === "signed") {
+        const timestamp = Math.floor(Date.now() / 1000);
+        const paramsToSign: Record<string, string> = {
+          timestamp: String(timestamp),
+        };
+        if (finalFolder) {
+          paramsToSign.folder = finalFolder;
+        }
+        const sortedString = Object.keys(paramsToSign)
+          .sort()
+          .map((k) => `${k}=${paramsToSign[k]}`)
+          .join("&");
+        const signature = await sha1Hex(`${sortedString}${cfg.api_secret}`);
+
+        return jsonResponse(
+          {
+            mode: "signed",
+            cloud_name: cfg.cloud_name,
+            api_key: cfg.api_key,
+            timestamp,
+            folder: finalFolder,
+            signature,
+            upload_url: uploadUrl,
+          },
+          200,
+          request
+        );
+      }
+
+      return jsonResponse(
+        {
+          mode: "unsigned",
+          cloud_name: cfg.cloud_name,
+          upload_preset: cfg.upload_preset,
+          folder: finalFolder,
+          upload_url: uploadUrl,
+        },
+        200,
+        request
+      );
+    }
+
+    if (subPath === "usage" && method === "GET") {
+      if (!isOwner) {
+        return jsonResponse({ error: "صلاحية المالك مطلوبة" }, 403, request);
+      }
+      const cfg = await loadCloudinaryConfig(env);
+      if (!cfg.cloud_name || !cfg.api_key || !cfg.api_secret) {
+        return jsonResponse(
+          { ok: false, error: "عرض الاستهلاك يتطلب ربط API Key و API Secret (وضع Signed)" },
+          200,
+          request
+        );
+      }
+      const res = await fetchCloudinaryUsage(cfg.cloud_name, cfg.api_key, cfg.api_secret);
+      return jsonResponse(res, 200, request);
+    }
+
+    if (subPath === "test" && method === "POST") {
+      if (!isOwner) {
+        return jsonResponse({ error: "صلاحية المالك مطلوبة" }, 403, request);
+      }
+      const saved = await loadCloudinaryConfig(env);
+      const body = (await request.json().catch(() => ({}))) as {
+        cloud_name?: string;
+        upload_mode?: "signed" | "unsigned";
+        upload_preset?: string;
+        api_key?: string;
+        api_secret?: string;
+      } | null;
+
+      const cloudName = sanitizeCloudName(body?.cloud_name || saved.cloud_name);
+      const mode = body?.upload_mode || saved.upload_mode;
+      const apiKey = String(body?.api_key ?? saved.api_key).trim();
+      const apiSecret = String(body?.api_secret?.trim() ? body.api_secret : saved.api_secret).trim();
+      const uploadPreset = String(body?.upload_preset ?? saved.upload_preset).trim();
+
+      if (!cloudName) {
+        return jsonResponse({ ok: false, error: "يرجى إدخال Cloud Name صالح أولاً" }, 400, request);
+      }
+
+      if (mode === "signed" || (apiKey && apiSecret && mode !== "unsigned")) {
+        if (!apiKey || !apiSecret) {
+          return jsonResponse({ ok: false, error: "يرجى إدخال API Key و API Secret لفحص الاتصال الموقّع" }, 400, request);
+        }
+        const usageRes = await fetchCloudinaryUsage(cloudName, apiKey, apiSecret);
+        if (!usageRes.ok) {
+          return jsonResponse(
+            {
+              ok: false,
+              error: `فشل الاتصال بـ Cloudinary: ${usageRes.error} (تأكد من Cloud Name و API Key و API Secret)`,
+            },
+            200,
+            request
+          );
+        }
+        return jsonResponse(
+          {
+            ok: true,
+            mode: "signed",
+            message: `تم الاتصال بنجاح بحساب Cloudinary (${cloudName}) — الخطة: ${usageRes.usage.plan} ✅`,
+            usage: usageRes.usage,
+          },
+          200,
+          request
+        );
+      }
+
+      // Unsigned preset probe (no file uploaded — verifies cloud_name is valid on Cloudinary API)
+      if (!uploadPreset) {
+        return jsonResponse({ ok: false, error: "يرجى إدخال Upload Preset لوضع الرفع غير الموقّع (Unsigned)" }, 400, request);
+      }
+      const probeForm = new FormData();
+      probeForm.append("upload_preset", uploadPreset);
+      const probeRes = await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(cloudName)}/video/upload`, {
+        method: "POST",
+        body: probeForm,
+      });
+      const probeJson = (await probeRes.json().catch(() => null)) as any;
+      const msg = String(probeJson?.error?.message || "");
+      if (probeRes.status === 401 || /invalid cloud_name|disabled|unknown api/i.test(msg)) {
+        return jsonResponse(
+          { ok: false, error: `اسم السحابة (Cloud Name: ${cloudName}) غير موجود أو معطّل في Cloudinary` },
+          200,
+          request
+        );
+      }
+      if (/preset/i.test(msg)) {
+        return jsonResponse(
+          { ok: false, error: `مشكلة في Upload Preset: ${msg} — تأكد أنه من نوع Unsigned في Cloudinary` },
+          200,
+          request
+        );
+      }
+      return jsonResponse(
+        {
+          ok: true,
+          mode: "unsigned",
+          message: `اسم السحابة (${cloudName}) صحيح وجاهز للرفع عبر Preset "${uploadPreset}" ✅`,
+        },
+        200,
+        request
+      );
+    }
+
+    return jsonResponse({ error: `Unknown cloudinary route: ${method} /api/cloudinary/${subPath}` }, 404, request);
+  } catch (err: any) {
+    return jsonResponse({ error: err?.message || "Cloudinary API error" }, 500, request);
+  }
+}
+
 // ============ D1 DATABASE REST HANDLER ============
 async function handleDbRequest(
   request: Request,
@@ -2324,6 +2757,11 @@ export default {
     // 24/7 Moodle Sync Admin API endpoints
     if (url.pathname.startsWith("/api/moodle-sync/")) {
       return handleMoodleSyncRequest(request, url, env);
+    }
+
+    // Cloudinary CDN Video Upload & Signing API endpoints
+    if (url.pathname.startsWith("/api/cloudinary/")) {
+      return handleCloudinaryRequest(request, url, env);
     }
 
     // Live D1 Database endpoints (with 3-layer Edge + R2 snapshot caching!)

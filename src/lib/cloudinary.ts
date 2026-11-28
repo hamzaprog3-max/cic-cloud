@@ -1,3 +1,5 @@
+import { getWorkerApiBase } from "@/lib/r2";
+
 /**
  * Unified Video & Media Streaming utilities (YouTube, Cloudinary, Cloudflare R2, Direct MP4/Audio, SharePoint/Teams).
  * Supports:
@@ -516,4 +518,363 @@ export function isOfflineCacheableUrl(url?: string | null): boolean {
   const parsed = parseCloudinaryVideo(url);
   if (parsed.isHls || parsed.isPlayerEmbed || parsed.isYouTube || parsed.isSharePoint) return false;
   return true;
+}
+
+/**
+ * Build a direct CDN download URL with Cloudinary's `fl_attachment` flag so browsers stream-download
+ * the video directly from Cloudinary without buffering large files into RAM.
+ */
+export function buildCloudinaryDownloadUrl(rawUrl?: string | null): string | null {
+  if (!rawUrl) return null;
+  const parsed = parseCloudinaryVideo(rawUrl, { requireCloudinary: true, allowYouTube: false });
+  if (!parsed.isValid || !parsed.isCloudinary || parsed.isSigned) return null;
+
+  // For HLS or Player embeds, download via the MP4 rendition with fl_attachment
+  if ((parsed.isHls || parsed.isPlayerEmbed) && parsed.cloudName && parsed.publicId) {
+    return `https://res.cloudinary.com/${encodeURIComponent(parsed.cloudName)}/video/upload/fl_attachment,f_mp4,q_auto/${parsed.publicId}.mp4`;
+  }
+
+  try {
+    const u = new URL(parsed.normalizedUrl);
+    if (!/\/video\/upload\//.test(u.pathname)) return null;
+    if (/\/fl_attachment\b/.test(u.pathname)) return u.toString();
+    u.pathname = u.pathname.replace("/video/upload/", "/video/upload/fl_attachment/");
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+/** Check whether a File object is a video or audio file suitable for Cloudinary CDN video hosting. */
+export function isVideoOrAudioFile(file: File): boolean {
+  if (file.type.startsWith("video/") || file.type.startsWith("audio/")) return true;
+  return VIDEO_EXT_RE.test(file.name) || AUDIO_EXT_RE.test(file.name);
+}
+
+/** Parse a pasted CLOUDINARY_URL (cloudinary://api_key:api_secret@cloud_name) if the user copies it from Cloudinary Dashboard. */
+export function parseCloudinaryConnectionUrl(raw: string): {
+  cloud_name: string;
+  api_key: string;
+  api_secret: string;
+} | null {
+  const cleaned = raw.trim().replace(/^CLOUDINARY_URL\s*=\s*/i, "").replace(/^["']|["']$/g, "");
+  const m = cleaned.match(/^cloudinary:\/\/([^:@\s]+):([^@\s]+)@([a-z0-9_-]{2,64})$/i);
+  if (!m) return null;
+  return {
+    api_key: decodeURIComponent(m[1]),
+    api_secret: decodeURIComponent(m[2]),
+    cloud_name: m[3],
+  };
+}
+
+// ============ CLOUDINARY CDN DIRECT UPLOAD CLIENT (SIGNED + UNSIGNED + CHUNKED) ============
+
+export interface CloudinaryConfigStatus {
+  configured: boolean;
+  enabled: boolean;
+  auto_route_videos: boolean;
+  upload_mode: "signed" | "unsigned";
+  effective_mode: "signed" | "unsigned" | "unconfigured";
+  cloud_name: string;
+  upload_preset: string;
+  api_key: string;
+  has_api_secret: boolean;
+  masked_api_secret: string;
+  folder: string;
+  updated_at: string | null;
+}
+
+export interface CloudinaryUsageStats {
+  plan: string;
+  last_updated: string | null;
+  credits: { usage: number; limit: number; used_percent: number } | null;
+  storage: { usage: number; credits_usage: number } | null;
+  bandwidth: { usage: number; credits_usage: number } | null;
+  resources: number;
+  derived_resources: number;
+}
+
+export interface CloudinaryUploadResult {
+  secureUrl: string;
+  publicId: string;
+  bytes: number;
+  duration?: number;
+  format?: string;
+  width?: number;
+  height?: number;
+  posterUrl: string | null;
+}
+
+interface CloudinarySignResponse {
+  mode: "signed" | "unsigned";
+  cloud_name: string;
+  upload_url: string;
+  folder: string;
+  api_key?: string;
+  timestamp?: number;
+  signature?: string;
+  upload_preset?: string;
+}
+
+function getAdminAuthHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...(extra || {}) };
+  const token = typeof localStorage !== "undefined" ? localStorage.getItem("lms_token") : null;
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  return headers;
+}
+
+export async function getCloudinaryConfig(): Promise<CloudinaryConfigStatus> {
+  const res = await fetch(`${getWorkerApiBase()}/api/cloudinary/config`, {
+    method: "GET",
+    headers: getAdminAuthHeaders(),
+    cache: "no-store",
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(data?.error || `فشل تحميل إعدادات Cloudinary (${res.status})`);
+  return data as CloudinaryConfigStatus;
+}
+
+export async function saveCloudinaryConfig(payload: {
+  cloud_name?: string;
+  upload_mode?: "signed" | "unsigned";
+  upload_preset?: string;
+  api_key?: string;
+  api_secret?: string;
+  clear_api_secret?: boolean;
+  folder?: string;
+  enabled?: boolean;
+  auto_route_videos?: boolean;
+}): Promise<CloudinaryConfigStatus> {
+  const res = await fetch(`${getWorkerApiBase()}/api/cloudinary/config`, {
+    method: "POST",
+    headers: getAdminAuthHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(data?.error || `فشل حفظ إعدادات Cloudinary (${res.status})`);
+  return data.config as CloudinaryConfigStatus;
+}
+
+export async function testCloudinaryConnection(payload?: {
+  cloud_name?: string;
+  upload_mode?: "signed" | "unsigned";
+  upload_preset?: string;
+  api_key?: string;
+  api_secret?: string;
+}): Promise<{ ok: boolean; mode?: string; message?: string; error?: string; usage?: CloudinaryUsageStats }> {
+  const res = await fetch(`${getWorkerApiBase()}/api/cloudinary/test`, {
+    method: "POST",
+    headers: getAdminAuthHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload || {}),
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(data?.error || `فشل فحص الاتصال (${res.status})`);
+  return data;
+}
+
+export async function getCloudinaryUsage(): Promise<{
+  ok: boolean;
+  usage?: CloudinaryUsageStats;
+  error?: string;
+}> {
+  const res = await fetch(`${getWorkerApiBase()}/api/cloudinary/usage`, {
+    method: "GET",
+    headers: getAdminAuthHeaders(),
+    cache: "no-store",
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(data?.error || `فشل جلب استهلاك Cloudinary (${res.status})`);
+  return data;
+}
+
+const CLOUDINARY_CHUNK_SIZE = 20 * 1024 * 1024; // 20 MB chunks (Cloudinary requires >= 5 MB per chunk)
+
+function formatCloudinaryError(rawMsg: string, fileSizeBytes: number): string {
+  const lower = rawMsg.toLowerCase();
+  if (lower.includes("file size too large") || lower.includes("maximum is")) {
+    const mb = (fileSizeBytes / (1024 * 1024)).toFixed(1);
+    return `حجم الفيديو (${mb} MB) أكبر من الحد المسموح في خطة Cloudinary الحالية (الخطة المجانية حدها الأقصى 100 MB للفيديو الواحد — يمكنك ضغطه أو تقسيمه أو الترقية).`;
+  }
+  if (lower.includes("invalid signature")) {
+    return "التوقيع غير صالح — تأكد من صحة API Secret في «إعدادات Cloudinary CDN».";
+  }
+  if (lower.includes("preset") && (lower.includes("not found") || lower.includes("unsigned"))) {
+    return "اسم الـ Upload Preset غير موجود أو غير مفعّل كـ Unsigned في لوحة تحكم Cloudinary.";
+  }
+  if (lower.includes("invalid cloud_name") || lower.includes("unknown api key")) {
+    return "تأكد من صحة Cloud Name و API Key في «إعدادات Cloudinary CDN».";
+  }
+  return rawMsg || "فشل رفع الفيديو على Cloudinary CDN";
+}
+
+function sendXhrChunk(
+  uploadUrl: string,
+  formData: FormData,
+  extraHeaders: Record<string, string>,
+  onLoaded: (loaded: number) => void,
+  signal?: AbortSignal
+): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", uploadUrl, true);
+    for (const [k, v] of Object.entries(extraHeaders)) {
+      xhr.setRequestHeader(k, v);
+    }
+
+    const onAbort = () => xhr.abort();
+    if (signal) {
+      if (signal.aborted) {
+        reject(new Error("تم إلغاء الرفع"));
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    xhr.upload.onprogress = (ev) => {
+      if (ev.lengthComputable) onLoaded(ev.loaded);
+    };
+
+    xhr.onload = () => {
+      signal?.removeEventListener("abort", onAbort);
+      let parsed: any = null;
+      try {
+        parsed = JSON.parse(xhr.responseText || "{}");
+      } catch {
+        parsed = null;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(parsed);
+      } else {
+        const msg = parsed?.error?.message || `HTTP ${xhr.status}`;
+        reject(new Error(msg));
+      }
+    };
+
+    xhr.onerror = () => {
+      signal?.removeEventListener("abort", onAbort);
+      reject(new Error("فشل الاتصال بسيرفر Cloudinary — تأكد من الإنترنت أو إعدادات الشبكة"));
+    };
+
+    xhr.onabort = () => {
+      signal?.removeEventListener("abort", onAbort);
+      reject(new Error("تم إلغاء رفع الفيديو"));
+    };
+
+    xhr.send(formData);
+  });
+}
+
+function buildUploadFormData(sign: CloudinarySignResponse, chunk: Blob, fileName: string): FormData {
+  const fd = new FormData();
+  fd.append("file", chunk, fileName);
+  if (sign.mode === "signed") {
+    if (sign.api_key) fd.append("api_key", sign.api_key);
+    if (sign.timestamp !== undefined) fd.append("timestamp", String(sign.timestamp));
+    if (sign.signature) fd.append("signature", sign.signature);
+  } else if (sign.upload_preset) {
+    fd.append("upload_preset", sign.upload_preset);
+  }
+  if (sign.folder) {
+    fd.append("folder", sign.folder);
+  }
+  return fd;
+}
+
+/**
+ * Upload a video/audio file directly from browser to Cloudinary CDN (never stored in Cloudflare R2).
+ * Automatically uses 20 MB chunked uploads for large lecture videos with live progress tracking.
+ * Returns only the CDN delivery link (`secureUrl`) + metadata to save as link-only in D1.
+ */
+export async function uploadVideoToCloudinary(
+  file: File,
+  options?: {
+    subfolder?: string;
+    onProgress?: (pct: number) => void;
+    signal?: AbortSignal;
+  }
+): Promise<CloudinaryUploadResult> {
+  const { subfolder, onProgress, signal } = options || {};
+
+  // 1. Obtain signed upload params (or unsigned preset) from Cloudflare Worker
+  const signRes = await fetch(`${getWorkerApiBase()}/api/cloudinary/sign`, {
+    method: "POST",
+    headers: getAdminAuthHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(subfolder ? { subfolder } : {}),
+    signal,
+  });
+  const signData = (await signRes.json().catch(() => null)) as (CloudinarySignResponse & { error?: string }) | null;
+  if (!signRes.ok || !signData?.upload_url) {
+    throw new Error(signData?.error || `فشل تحضير رفع Cloudinary (${signRes.status})`);
+  }
+
+  const totalSize = file.size;
+  let finalResponse: any = null;
+
+  try {
+    if (totalSize <= CLOUDINARY_CHUNK_SIZE) {
+      const fd = buildUploadFormData(signData, file, file.name);
+      finalResponse = await sendXhrChunk(
+        signData.upload_url,
+        fd,
+        {},
+        (loaded) => {
+          if (onProgress && totalSize > 0) {
+            onProgress(Math.min(99, Math.round((loaded / totalSize) * 100)));
+          }
+        },
+        signal
+      );
+    } else {
+      const uniqueUploadId = `cic-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      let offset = 0;
+
+      while (offset < totalSize) {
+        const end = Math.min(offset + CLOUDINARY_CHUNK_SIZE, totalSize);
+        const chunk = file.slice(offset, end);
+        const fd = buildUploadFormData(signData, chunk, file.name);
+        const chunkStart = offset;
+        const contentRange = `bytes ${chunkStart}-${end - 1}/${totalSize}`;
+
+        finalResponse = await sendXhrChunk(
+          signData.upload_url,
+          fd,
+          {
+            "X-Unique-Upload-Id": uniqueUploadId,
+            "Content-Range": contentRange,
+          },
+          (loaded) => {
+            if (onProgress && totalSize > 0) {
+              const overall = Math.min(totalSize, chunkStart + Math.min(loaded, end - chunkStart));
+              onProgress(Math.min(99, Math.round((overall / totalSize) * 100)));
+            }
+          },
+          signal
+        );
+
+        offset = end;
+      }
+    }
+  } catch (err: any) {
+    throw new Error(formatCloudinaryError(err?.message || "", totalSize));
+  }
+
+  const secureUrl = String(finalResponse?.secure_url || finalResponse?.url || "");
+  const publicId = String(finalResponse?.public_id || "");
+  if (!secureUrl) {
+    throw new Error("لم يُرجع Cloudinary رابط الفيديو بعد الرفع");
+  }
+
+  onProgress?.(100);
+  const parsed = parseCloudinaryVideo(secureUrl, { requireCloudinary: true, allowYouTube: false });
+
+  return {
+    secureUrl,
+    publicId,
+    bytes: Number(finalResponse?.bytes || totalSize),
+    duration: typeof finalResponse?.duration === "number" ? finalResponse.duration : undefined,
+    format: finalResponse?.format ? String(finalResponse.format) : undefined,
+    width: typeof finalResponse?.width === "number" ? finalResponse.width : undefined,
+    height: typeof finalResponse?.height === "number" ? finalResponse.height : undefined,
+    posterUrl: parsed.posterUrl,
+  };
 }
