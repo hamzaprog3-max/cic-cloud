@@ -148,3 +148,59 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at DESC);
+
+-- ============ MOODLE 24/7 AUTO-SYNC TABLES ============
+CREATE TABLE IF NOT EXISTS moodle_sync_config (
+  id TEXT PRIMARY KEY,
+  moodle_base_url TEXT NOT NULL DEFAULT 'https://learn3.sha.edu.eg',
+  session_cookie TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  notify_students INTEGER NOT NULL DEFAULT 1,
+  session_status TEXT NOT NULL DEFAULT 'unconfigured',
+  last_check_at TEXT,
+  last_sync_at TEXT,
+  last_error TEXT,
+  last_summary TEXT,
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS moodle_sync_courses (
+  id TEXT PRIMARY KEY,
+  moodle_course_id TEXT NOT NULL UNIQUE,
+  moodle_course_name TEXT NOT NULL,
+  cic_course_id TEXT NOT NULL,
+  cic_course_name TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_synced_at TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS moodle_sync_items (
+  id TEXT PRIMARY KEY,
+  moodle_course_id TEXT NOT NULL,
+  moodle_key TEXT NOT NULL,
+  moodle_cmid TEXT NOT NULL,
+  moodle_type TEXT NOT NULL,
+  moodle_title TEXT NOT NULL,
+  source_url TEXT,
+  material_id TEXT,
+  status TEXT NOT NULL DEFAULT 'synced',
+  synced_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(moodle_course_id, moodle_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_moodle_sync_items_course ON moodle_sync_items(moodle_course_id, moodle_key);
+
+CREATE TABLE IF NOT EXISTS moodle_sync_runs (
+  id TEXT PRIMARY KEY,
+  trigger_type TEXT NOT NULL DEFAULT 'cron',
+  status TEXT NOT NULL,
+  courses_checked INTEGER NOT NULL DEFAULT 0,
+  items_added INTEGER NOT NULL DEFAULT 0,
+  items_skipped INTEGER NOT NULL DEFAULT 0,
+  errors TEXT,
+  started_at TEXT NOT NULL,
+  finished_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_moodle_sync_runs_started ON moodle_sync_runs(started_at DESC);

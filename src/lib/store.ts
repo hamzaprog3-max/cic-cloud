@@ -40,10 +40,12 @@ function getAuthHeaders(extra?: Record<string, string>): Record<string, string> 
 }
 
 async function apiGet<T>(path: string): Promise<T> {
+  const headers = getAuthHeaders();
+  const isAuthenticated = Boolean(headers["Authorization"]);
   const res = await fetch(`${API_BASE()}${path}`, {
     method: "GET",
-    headers: getAuthHeaders(),
-    cache: "no-store",
+    headers,
+    cache: isAuthenticated ? "no-store" : "default",
   });
   if (!res.ok) {
     const err = await res.json().catch(() => null);

@@ -1,4 +1,5 @@
 import { onRequestOptions as geminiOptions, onRequestPost as geminiPost } from "../functions/api/gemini";
+import { ensureMoodleSyncTables, runMoodleSync } from "./moodle-sync-worker";
 
 interface R2HttpMetadata {
   contentType?: string;
@@ -919,8 +920,500 @@ async function handleDownload(request: Request, url: URL, env: Env): Promise<Res
   });
 }
 
+// ============ 3-LAYER PUBLIC DB READ CACHE (Isolate RAM -> Edge Cache -> R2 Snapshot -> D1) ============
+// Eliminates D1 free-tier daily row read exhaustion (>99.5% read reduction) and keeps site online even if D1 errors.
+
+interface PublicDbSnapshot {
+  updatedAt: string;
+  updatedAtMs: number;
+  departments: any[];
+  categories: any[];
+  courses: any[];
+  materials: any[];
+  links: any[];
+  announcements: any[];
+  sharedCourses: any[];
+  notificationTemplates: any[];
+  notifications: any[];
+}
+
+const PUBLIC_DB_SNAPSHOT_KEY = "_cache/public-db.json";
+const MEM_SNAPSHOT_TTL_MS = 30_000; // 30s isolate RAM cache
+const R2_SNAPSHOT_TTL_MS = 10 * 60 * 1000; // 10 min R2 snapshot TTL (rebuilt immediately on every admin write!)
+const PUBLIC_CACHE_RESOURCES = new Set([
+  "departments",
+  "categories",
+  "courses",
+  "materials",
+  "material-urls",
+  "links",
+  "announcements",
+  "shared-courses",
+  "notification-templates",
+  "notifications",
+]);
+
+let memPublicSnapshot: { data: PublicDbSnapshot; fetchedAt: number } | null = null;
+let inflightSnapshotPromise: Promise<PublicDbSnapshot> | null = null;
+
+function cachedJsonResponse(
+  data: unknown,
+  status: number,
+  request: Request | undefined,
+  cacheControl: string,
+  cacheHeader = "MISS"
+): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": cacheControl,
+      "X-Content-Type-Options": "nosniff",
+      "X-CIC-Cache": cacheHeader,
+      ...getCorsHeaders(request),
+    },
+  });
+}
+
+async function purgeEdgePublicCaches(origin: string): Promise<void> {
+  try {
+    const cache = (caches as unknown as { default: Cache }).default;
+    const paths = [
+      "/api/db/departments",
+      "/api/db/categories",
+      "/api/db/courses",
+      "/api/db/materials",
+      "/api/db/links",
+      "/api/db/announcements",
+      "/api/db/shared-courses",
+      "/api/db/notification-templates",
+      "/api/db/notifications",
+    ];
+    await Promise.all(
+      paths.map((p) => cache.delete(new Request(`${origin}${p}`, { method: "GET" })).catch(() => false))
+    );
+  } catch {
+    // Cache API unavailable in some local test environments
+  }
+}
+
+async function rebuildPublicSnapshot(env: Env, originForPurge = "https://cic-cloud.com"): Promise<PublicDbSnapshot> {
+  const [
+    depts,
+    cats,
+    courses,
+    mats,
+    links,
+    anns,
+    shared,
+    templates,
+    notifs,
+  ] = await Promise.all([
+    env.DB.prepare("SELECT * FROM departments ORDER BY created_at ASC").all(),
+    env.DB.prepare(
+      "SELECT * FROM material_categories ORDER BY CASE WHEN display_order IS NULL THEN 9999 ELSE display_order END ASC, created_at ASC"
+    ).all(),
+    env.DB.prepare("SELECT * FROM courses ORDER BY created_at ASC").all(),
+    env.DB.prepare("SELECT * FROM materials WHERE deleted_at IS NULL ORDER BY created_at DESC").all(),
+    env.DB.prepare("SELECT * FROM important_links ORDER BY created_at ASC").all(),
+    env.DB.prepare("SELECT * FROM announcements ORDER BY created_at DESC").all(),
+    env.DB.prepare("SELECT * FROM shared_department_courses").all(),
+    env.DB.prepare("SELECT * FROM notification_templates").all(),
+    env.DB.prepare("SELECT * FROM notifications ORDER BY created_at DESC LIMIT 200").all(),
+  ]);
+
+  const nowMs = Date.now();
+  const snapshot: PublicDbSnapshot = {
+    updatedAt: new Date(nowMs).toISOString(),
+    updatedAtMs: nowMs,
+    departments: depts.results,
+    categories: cats.results,
+    courses: courses.results,
+    materials: mats.results.map(formatMaterial),
+    links: links.results.map(formatLink),
+    announcements: anns.results,
+    sharedCourses: shared.results,
+    notificationTemplates: templates.results,
+    notifications: notifs.results,
+  };
+
+  memPublicSnapshot = { data: snapshot, fetchedAt: nowMs };
+
+  try {
+    await env.R2_BUCKET.put(PUBLIC_DB_SNAPSHOT_KEY, JSON.stringify(snapshot), {
+      httpMetadata: {
+        contentType: "application/json; charset=utf-8",
+        cacheControl: "no-store",
+      },
+    });
+  } catch (err) {
+    console.warn("Failed to write R2 public DB snapshot:", err);
+  }
+
+  await purgeEdgePublicCaches(originForPurge);
+  return snapshot;
+}
+
+async function getPublicSnapshot(env: Env, forceRefresh = false): Promise<{ data: PublicDbSnapshot; source: string }> {
+  const now = Date.now();
+
+  if (!forceRefresh && memPublicSnapshot && now - memPublicSnapshot.fetchedAt < MEM_SNAPSHOT_TTL_MS) {
+    return { data: memPublicSnapshot.data, source: "MEM" };
+  }
+
+  let r2Stale: PublicDbSnapshot | null = null;
+  if (!forceRefresh) {
+    try {
+      const obj = await env.R2_BUCKET.get(PUBLIC_DB_SNAPSHOT_KEY);
+      if (obj) {
+        const parsed = (await obj.json()) as PublicDbSnapshot;
+        if (parsed && Array.isArray(parsed.courses) && Array.isArray(parsed.materials)) {
+          r2Stale = parsed;
+          if (now - (parsed.updatedAtMs || 0) < R2_SNAPSHOT_TTL_MS) {
+            memPublicSnapshot = { data: parsed, fetchedAt: now };
+            return { data: parsed, source: "R2" };
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("R2 snapshot read failed:", err);
+    }
+  }
+
+  // Deduplicate concurrent rebuilds inside the same Worker isolate
+  if (!inflightSnapshotPromise) {
+    inflightSnapshotPromise = rebuildPublicSnapshot(env).finally(() => {
+      inflightSnapshotPromise = null;
+    });
+  }
+
+  try {
+    const fresh = await inflightSnapshotPromise;
+    return { data: fresh, source: "D1-REFRESH" };
+  } catch (err) {
+    // CRITICAL FALLBACK: if D1 ever hits quota or transient error, serve the last R2/RAM snapshot instead of crashing!
+    console.error("D1 snapshot rebuild failed, serving fallback snapshot:", err);
+    if (r2Stale) {
+      memPublicSnapshot = { data: r2Stale, fetchedAt: now };
+      return { data: r2Stale, source: "R2-STALE-FALLBACK" };
+    }
+    if (memPublicSnapshot) {
+      return { data: memPublicSnapshot.data, source: "MEM-STALE-FALLBACK" };
+    }
+    throw err;
+  }
+}
+
+function sortCourseMaterials(list: any[]): any[] {
+  return [...list].sort((a, b) => {
+    const aHasOrder = a.sort_order !== null && a.sort_order !== undefined;
+    const bHasOrder = b.sort_order !== null && b.sort_order !== undefined;
+    if (aHasOrder !== bHasOrder) return aHasOrder ? -1 : 1;
+    if (aHasOrder && bHasOrder && a.sort_order !== b.sort_order) return a.sort_order - b.sort_order;
+    return String(b.created_at || "").localeCompare(String(a.created_at || ""));
+  });
+}
+
+async function handleCachedPublicDbGet(
+  request: Request,
+  url: URL,
+  env: Env,
+  ctx: { waitUntil(p: Promise<unknown>): void },
+  resource: string,
+  idParam?: string
+): Promise<Response | null> {
+  if (!PUBLIC_CACHE_RESOURCES.has(resource)) return null;
+
+  const isAuthenticated = Boolean(request.headers.get("Authorization"));
+  const forceFresh = url.searchParams.get("fresh") === "1";
+
+  // 1. Check Cloudflare Edge Cache for unauthenticated student GETs (0 D1 reads, 0 R2 reads!)
+  let edgeCache: Cache | null = null;
+  let edgeCacheKey: Request | null = null;
+  if (!isAuthenticated && !forceFresh) {
+    try {
+      edgeCache = (caches as unknown as { default: Cache }).default;
+      edgeCacheKey = new Request(url.toString(), { method: "GET" });
+      const hit = await edgeCache.match(edgeCacheKey);
+      if (hit) {
+        const out = new Response(hit.body, hit);
+        const cors = getCorsHeaders(request);
+        for (const [k, v] of Object.entries(cors)) out.headers.set(k, v);
+        out.headers.set("Cache-Control", "private, no-cache");
+        out.headers.set("X-CIC-Cache", "EDGE-HIT");
+        return out;
+      }
+    } catch {
+      edgeCache = null;
+    }
+  }
+
+  const { data: snap, source } = await getPublicSnapshot(env, forceFresh);
+  let payload: unknown = null;
+
+  if (resource === "departments") {
+    payload = snap.departments;
+  } else if (resource === "categories") {
+    payload = snap.categories;
+  } else if (resource === "courses") {
+    const deptId = url.searchParams.get("department_id");
+    payload = deptId ? snap.courses.filter((c) => c.department_id === deptId) : snap.courses;
+  } else if (resource === "materials") {
+    if (idParam) {
+      payload = snap.materials.find((m) => m.id === idParam) ?? null;
+    } else {
+      const courseId = url.searchParams.get("course_id");
+      const deptId = url.searchParams.get("department_id");
+      if (courseId) {
+        payload = sortCourseMaterials(snap.materials.filter((m) => m.course_id === courseId));
+      } else if (deptId) {
+        const deptCourseIds = new Set(snap.courses.filter((c) => c.department_id === deptId).map((c) => c.id));
+        payload = sortCourseMaterials(snap.materials.filter((m) => deptCourseIds.has(m.course_id)));
+      } else {
+        payload = snap.materials;
+      }
+    }
+  } else if (resource === "material-urls") {
+    const rawIds = url.searchParams.get("course_ids") || "";
+    const ids = new Set(rawIds.split(",").map((s) => s.trim()).filter(Boolean));
+    payload = ids.size === 0
+      ? []
+      : snap.materials
+          .filter((m) => ids.has(m.course_id) && !m.archived && m.pdf_url)
+          .map((m) => m.pdf_url);
+  } else if (resource === "links") {
+    const deptId = url.searchParams.get("department_id");
+    payload = deptId ? snap.links.filter((l) => !l.department_id || l.department_id === deptId) : snap.links;
+  } else if (resource === "announcements") {
+    const nowIso = new Date().toISOString();
+    payload = snap.announcements.filter((a) => String(a.expires_at || "") > nowIso);
+  } else if (resource === "shared-courses") {
+    const targetDept = url.searchParams.get("target_department_id");
+    const courseId = url.searchParams.get("course_id");
+    if (targetDept) {
+      payload = snap.sharedCourses.filter((s) => s.target_department_id === targetDept);
+    } else if (courseId) {
+      payload = snap.sharedCourses.filter((s) => s.course_id === courseId);
+    } else {
+      payload = snap.sharedCourses;
+    }
+  } else if (resource === "notification-templates") {
+    payload = snap.notificationTemplates;
+  } else if (resource === "notifications") {
+    payload = snap.notifications;
+  }
+
+  const clientCacheControl = isAuthenticated ? "no-store" : "private, no-cache";
+  const resp = cachedJsonResponse(payload, 200, request, clientCacheControl, source);
+
+  if (edgeCache && edgeCacheKey && !isAuthenticated && !forceFresh) {
+    const edgeResp = cachedJsonResponse(payload, 200, request, "public, max-age=60, s-maxage=60", source);
+    ctx.waitUntil(edgeCache.put(edgeCacheKey, edgeResp).catch(() => undefined));
+  }
+
+  return resp;
+}
+
+// ============ MOODLE 24/7 AUTO-SYNC API HANDLER ============
+async function handleMoodleSyncRequest(request: Request, url: URL, env: Env): Promise<Response> {
+  const claims = await verifyToken(request, env);
+  if (!claims || claims.role !== "owner") {
+    return jsonResponse({ error: "صلاحية المالك مطلوبة لإدارة مزامنة مودل" }, 403, request);
+  }
+
+  await ensureMoodleSyncTables(env);
+  const subPath = url.pathname.replace(/^\/api\/moodle-sync\/?/, "");
+  const method = request.method;
+
+  try {
+    if (subPath === "status" && method === "GET") {
+      const [cfg, coursesRes, runsRes, countsRes] = await Promise.all([
+        env.DB.prepare("SELECT * FROM moodle_sync_config WHERE id = 'default'").first<Record<string, any>>(),
+        env.DB.prepare("SELECT * FROM moodle_sync_courses ORDER BY moodle_course_id ASC").all<Record<string, any>>(),
+        env.DB.prepare("SELECT * FROM moodle_sync_runs ORDER BY started_at DESC LIMIT 15").all<Record<string, any>>(),
+        env.DB.prepare(
+          "SELECT moodle_course_id, status, COUNT(*) AS cnt FROM moodle_sync_items GROUP BY moodle_course_id, status"
+        ).all<Record<string, any>>(),
+      ]);
+
+      const rawCookie = String(cfg?.session_cookie || "");
+      const maskedCookie = rawCookie
+        ? `${rawCookie.slice(0, 18)}••••${rawCookie.slice(-4)}`
+        : "";
+
+      const itemCounts: Record<string, { synced: number; linked: number }> = {};
+      for (const r of countsRes.results) {
+        const cid = String(r.moodle_course_id);
+        if (!itemCounts[cid]) itemCounts[cid] = { synced: 0, linked: 0 };
+        if (r.status === "synced") itemCounts[cid].synced += Number(r.cnt || 0);
+        else if (r.status === "linked_existing") itemCounts[cid].linked += Number(r.cnt || 0);
+      }
+
+      return jsonResponse(
+        {
+          config: cfg
+            ? {
+                moodle_base_url: cfg.moodle_base_url,
+                has_cookie: Boolean(rawCookie),
+                masked_cookie: maskedCookie,
+                enabled: Boolean(cfg.enabled),
+                notify_students: Boolean(cfg.notify_students),
+                session_status: cfg.session_status,
+                last_check_at: cfg.last_check_at,
+                last_sync_at: cfg.last_sync_at,
+                last_error: cfg.last_error,
+                last_summary: cfg.last_summary,
+                updated_at: cfg.updated_at,
+                cron_schedule: "كل 25 دقيقة تلقائياً (24/7 على Cloudflare Workers)",
+              }
+            : null,
+          courses: coursesRes.results.map((c) => ({
+            ...c,
+            enabled: Boolean(c.enabled),
+            stats: itemCounts[String(c.moodle_course_id)] || { synced: 0, linked: 0 },
+          })),
+          runs: runsRes.results.map((r) => {
+            let errs: string[] = [];
+            try {
+              errs = r.errors ? JSON.parse(String(r.errors)) : [];
+            } catch {}
+            return { ...r, errors: errs };
+          }),
+        },
+        200,
+        request
+      );
+    }
+
+    if (subPath === "config" && method === "POST") {
+      const body = (await request.json().catch(() => null)) as {
+        session_cookie?: string;
+        enabled?: boolean;
+        notify_students?: boolean;
+        moodle_base_url?: string;
+      } | null;
+      if (!body) return jsonResponse({ error: "Invalid JSON" }, 400, request);
+
+      const fields: string[] = [];
+      const vals: unknown[] = [];
+
+      if (typeof body.session_cookie === "string" && body.session_cookie.trim()) {
+        fields.push("session_cookie = ?", "session_status = 'active'", "last_error = NULL");
+        vals.push(body.session_cookie.trim());
+      }
+      if (typeof body.enabled === "boolean") {
+        fields.push("enabled = ?");
+        vals.push(body.enabled ? 1 : 0);
+      }
+      if (typeof body.notify_students === "boolean") {
+        fields.push("notify_students = ?");
+        vals.push(body.notify_students ? 1 : 0);
+      }
+      if (typeof body.moodle_base_url === "string" && body.moodle_base_url.trim().startsWith("https://")) {
+        fields.push("moodle_base_url = ?");
+        vals.push(body.moodle_base_url.trim().replace(/\/+$/, ""));
+      }
+
+      if (fields.length > 0) {
+        fields.push("updated_at = ?");
+        vals.push(new Date().toISOString());
+        await env.DB.prepare(`UPDATE moodle_sync_config SET ${fields.join(", ")} WHERE id = 'default'`)
+          .bind(...vals)
+          .run();
+      }
+      return jsonResponse({ ok: true }, 200, request);
+    }
+
+    if (subPath === "courses" && method === "POST") {
+      const body = (await request.json().catch(() => null)) as {
+        moodle_course_id?: string;
+        moodle_course_name?: string;
+        cic_course_id?: string;
+        cic_course_name?: string;
+        enabled?: boolean;
+      } | null;
+      if (!body?.moodle_course_id || !body?.cic_course_id) {
+        return jsonResponse({ error: "moodle_course_id و cic_course_id مطلوبان" }, 400, request);
+      }
+      const existing = await env.DB.prepare("SELECT id FROM moodle_sync_courses WHERE moodle_course_id = ?")
+        .bind(String(body.moodle_course_id).trim())
+        .first<{ id: string }>();
+
+      if (existing) {
+        await env.DB.prepare(
+          "UPDATE moodle_sync_courses SET moodle_course_name = ?, cic_course_id = ?, cic_course_name = ?, enabled = ? WHERE id = ?"
+        )
+          .bind(
+            body.moodle_course_name || body.moodle_course_id,
+            body.cic_course_id,
+            body.cic_course_name || body.cic_course_id,
+            body.enabled === false ? 0 : 1,
+            existing.id
+          )
+          .run();
+      } else {
+        await env.DB.prepare(
+          `INSERT INTO moodle_sync_courses (id, moodle_course_id, moodle_course_name, cic_course_id, cic_course_name, enabled, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+          .bind(
+            `ms-course-${String(body.moodle_course_id).trim()}`,
+            String(body.moodle_course_id).trim(),
+            body.moodle_course_name || body.moodle_course_id,
+            body.cic_course_id,
+            body.cic_course_name || body.cic_course_id,
+            body.enabled === false ? 0 : 1,
+            new Date().toISOString()
+          )
+          .run();
+      }
+      return jsonResponse({ ok: true }, 200, request);
+    }
+
+    if (subPath.startsWith("courses/") && method === "PATCH") {
+      const courseRowId = decodeURIComponent(subPath.slice("courses/".length));
+      const body = (await request.json().catch(() => null)) as { enabled?: boolean } | null;
+      if (typeof body?.enabled === "boolean") {
+        await env.DB.prepare("UPDATE moodle_sync_courses SET enabled = ? WHERE id = ?")
+          .bind(body.enabled ? 1 : 0, courseRowId)
+          .run();
+      }
+      return jsonResponse({ ok: true }, 200, request);
+    }
+
+    if (subPath === "run" && method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as { onlyCourseId?: string } | null;
+      const result = await runMoodleSync(
+        env,
+        {
+          buildPublicUrl,
+          inferContentType,
+          refreshPublicCache: async () => {
+            await rebuildPublicSnapshot(env, url.origin);
+          },
+        },
+        {
+          triggerType: "manual",
+          force: true,
+          onlyCourseId: body?.onlyCourseId,
+        }
+      );
+      return jsonResponse(result, result.ok ? 200 : 200, request);
+    }
+
+    return jsonResponse({ error: `Unknown moodle-sync route: ${method} /api/moodle-sync/${subPath}` }, 404, request);
+  } catch (err: any) {
+    return jsonResponse({ error: err?.message || "Moodle sync error" }, 500, request);
+  }
+}
+
 // ============ D1 DATABASE REST HANDLER ============
-async function handleDbRequest(request: Request, url: URL, env: Env): Promise<Response> {
+async function handleDbRequest(
+  request: Request,
+  url: URL,
+  env: Env,
+  ctx: { waitUntil(p: Promise<unknown>): void }
+): Promise<Response> {
   const path = url.pathname.replace(/^\/api\/db\/?/, "");
   const segments = path.split("/").filter(Boolean);
   const resource = segments[0] || "";
@@ -928,6 +1421,51 @@ async function handleDbRequest(request: Request, url: URL, env: Env): Promise<Re
   const subAction = segments[2] ? decodeURIComponent(segments[2]) : undefined;
   const method = request.method;
 
+  try {
+    // Manual owner-only cache refresh trigger
+    if (resource === "cache" && idParam === "refresh" && method === "POST") {
+      const claims = await verifyToken(request, env);
+      if (!claims || claims.role !== "owner") {
+        return jsonResponse({ error: "صلاحية المالك مطلوبة" }, 403, request);
+      }
+      const snap = await rebuildPublicSnapshot(env, url.origin);
+      return jsonResponse(
+        { ok: true, updatedAt: snap.updatedAt, materials: snap.materials.length, courses: snap.courses.length },
+        200,
+        request
+      );
+    }
+
+    // Serve ALL public DB GETs from the 3-layer cache (Isolate RAM -> Edge Cache -> R2 Snapshot -> D1)
+    if (method === "GET" && PUBLIC_CACHE_RESOURCES.has(resource)) {
+      const cachedRes = await handleCachedPublicDbGet(request, url, env, ctx, resource, idParam);
+      if (cachedRes) return cachedRes;
+    }
+
+    const res = await handleDbMutationOrPrivate(request, url, env, resource, idParam, subAction, method);
+
+    // Synchronously rebuild R2 snapshot + purge edge cache after any successful public-table write
+    if (method !== "GET" && PUBLIC_CACHE_RESOURCES.has(resource) && res.status >= 200 && res.status < 300) {
+      await rebuildPublicSnapshot(env, url.origin).catch((e) => console.warn("Post-mutation cache refresh failed:", e));
+    }
+
+    return res;
+  } catch (err: any) {
+    console.error("DB API Error:", err);
+    return jsonResponse({ error: err?.message || "Database error" }, 500, request);
+  }
+}
+
+async function handleDbMutationOrPrivate(
+  request: Request,
+  url: URL,
+  env: Env,
+  resource: string,
+  idParam: string | undefined,
+  subAction: string | undefined,
+  method: string
+): Promise<Response> {
+  const path = url.pathname.replace(/^\/api\/db\/?/, "");
   try {
     // ---- DEPARTMENTS ----
     if (resource === "departments" && method === "GET") {
@@ -1595,7 +2133,11 @@ async function handleDbRequest(request: Request, url: URL, env: Env): Promise<Re
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: { waitUntil(p: Promise<unknown>): void }
+  ): Promise<Response> {
     const url = new URL(request.url);
 
     // Canonical redirect: www.cic-cloud.com -> https://cic-cloud.com (ensures single fresh version & unified session)
@@ -1628,9 +2170,14 @@ export default {
       return handleChangeOwnerPassword(request, env);
     }
 
-    // Live D1 Database endpoints
+    // 24/7 Moodle Sync Admin API endpoints
+    if (url.pathname.startsWith("/api/moodle-sync/")) {
+      return handleMoodleSyncRequest(request, url, env);
+    }
+
+    // Live D1 Database endpoints (with 3-layer Edge + R2 snapshot caching!)
     if (url.pathname.startsWith("/api/db/")) {
-      return handleDbRequest(request, url, env);
+      return handleDbRequest(request, url, env, ctx);
     }
 
     // Design feedback endpoint
@@ -1736,5 +2283,28 @@ export default {
     }
 
     return env.ASSETS.fetch(request);
+  },
+
+  // 24/7 Automated Cron Trigger (runs every 25 minutes on Cloudflare's edge servers!)
+  async scheduled(
+    _controller: { scheduledTime: number; cron: string },
+    env: Env,
+    ctx: { waitUntil(p: Promise<unknown>): void }
+  ): Promise<void> {
+    ctx.waitUntil(
+      runMoodleSync(
+        env,
+        {
+          buildPublicUrl,
+          inferContentType,
+          refreshPublicCache: async () => {
+            await rebuildPublicSnapshot(env, "https://cic-cloud.com");
+          },
+        },
+        { triggerType: "cron" }
+      ).catch((err) => {
+        console.error("Scheduled Moodle sync error:", err);
+      })
+    );
   },
 };

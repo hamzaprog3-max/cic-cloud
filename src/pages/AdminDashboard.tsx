@@ -20,8 +20,9 @@ import AnnouncementManager from "@/components/admin/AnnouncementManager";
 import NotificationTemplateManager from "@/components/admin/NotificationTemplateManager";
 import { ScheduleManager } from "@/components/admin/ScheduleManager";
 import { AiProvidersManagerModal } from "@/components/admin/AiProvidersManagerModal";
+import MoodleSyncManager from "@/components/admin/MoodleSyncManager";
 import AuditLog from "./AuditLog";
-import { ShieldAlert, Megaphone, Calendar } from "lucide-react";
+import { ShieldAlert, Megaphone, Calendar, RefreshCw } from "lucide-react";
 import { yearLabel } from "@/lib/year-context";
 import {
   DndContext,
@@ -224,6 +225,7 @@ const AdminDashboard = () => {
     sections.push({ key: "announcements", label: lang === "ar" ? "الإعلانات العامة" : "Announcements", icon: Megaphone });
   }
   if (isOwner) {
+    sections.push({ key: "moodle_sync", label: lang === "ar" ? "مزامنة مودل 24/7" : "Moodle 24/7 Sync", icon: RefreshCw });
     sections.push({ key: "notification_templates", label: lang === "ar" ? "قوالب الإشعارات" : "Notification Templates", icon: Layers });
     sections.push({ key: "moderators", label: t("admin.moderators"), icon: Users });
     sections.push({ key: "audit_logs", label: lang === "ar" ? "سجل الإدارة" : "Audit Logs", icon: ShieldAlert });
@@ -1207,6 +1209,7 @@ const AdminDashboard = () => {
           </div>
         )}
 
+        {activeSection === "moodle_sync" && isOwner && <MoodleSyncManager onSynced={loadData} />}
         {activeSection === "notifications" && <NotificationManager />}
         {activeSection === "notification_templates" && isOwner && <NotificationTemplateManager />}
         {activeSection === "announcements" && (isOwner || auth.hasPermission("announcements")) && <AnnouncementManager />}

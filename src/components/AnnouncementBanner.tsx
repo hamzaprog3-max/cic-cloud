@@ -1,22 +1,24 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { AlertCircle, Clock, Volume2, X, Sparkles } from "lucide-react";
-import { db, type Announcement, type Material, type Course } from "@/lib/store";
+import { useQuery } from "@tanstack/react-query";
+import { db, type Course } from "@/lib/store";
 import { useI18n } from "@/lib/i18n";
 import { useYear } from "@/hooks/use-year";
-import { differenceInHours } from "date-fns";
 import { useNavigate } from "react-router-dom";
 import { openLink, extractFirstUrl } from "@/lib/utils";
 
 const AUTO_DISMISS_MS = 10_000; // 10 seconds
+const BANNER_STALE_MS = 5 * 60 * 1000; // 5 minutes
+const BANNER_POLL_MS = 10 * 60 * 1000; // 10 minutes (was 60s full-table scan!)
 
 const AnnouncementBanner = () => {
   const { lang } = useI18n();
   const navigate = useNavigate();
   const { year } = useYear();
-  const [announcements, setAnnouncements] = useState<Announcement[]>([]);
-  const [urgentAssignments, setUrgentAssignments] = useState<{ id: string; title: string; course: string; hoursLeft: number; minutesLeft: number }[]>([]);
-  const [recentUpdates, setRecentUpdates] = useState<{ id: string; title: string; course: string; courseId: string }[]>([]);
+  const [deptContext, setDeptContext] = useState<string | null>(() =>
+    typeof localStorage !== "undefined" ? localStorage.getItem("cic_dept_context") : null
+  );
   const [currentIndex, setCurrentIndex] = useState(0);
 
   // Track which banner sections have been dismissed (urgent / normal)
@@ -28,113 +30,114 @@ const AnnouncementBanner = () => {
   const normalTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const [anns, materials, courses, departments] = await Promise.all([
-          db.getAnnouncements(),
-          db.getMaterials(),
-          db.getCourses(),
-          db.getDepartments()
-        ]);
-        
-        const deptContext = localStorage.getItem("cic_dept_context");
-
-        const courseMatchesUser = (course?: Course | null) => {
-          if (!course) return false;
-          if (course.code === "BACHELOR-PROG") return false;
-
-          // Filter by Academic Year:
-          if (year && year !== "all" && (course.academic_year || "1") !== year) {
-            return false;
-          }
-
-          // Filter by Department:
-          if (deptContext && deptContext !== "all" && course.department_id) {
-            const courseDept = departments.find(d => d.id === course.department_id);
-            if (courseDept) {
-              const isCs = courseDept.name_en === "CS";
-              if (deptContext === "cs" && !isCs) return false;
-              if (deptContext === "ai_cyber" && isCs) return false;
-              if (deptContext === "bachelor" && courseDept.name_en !== "Bachelor") return false;
-            }
-          }
-          return true;
-        };
-        
-        const filteredAnns = anns.filter(a => {
-          const yearMatch = !a.target_year || a.target_year === "all" || a.target_year === year;
-          const deptMatch = !a.target_dept || a.target_dept === "all" || a.target_dept === deptContext;
-          return yearMatch && deptMatch;
-        });
-        setAnnouncements(filteredAnns);
-        
-        // Find assignments due in less than 24 hours (filtered for this user's year & dept)
-        const now = new Date();
-        const urgent = materials
-          .filter(m => m.is_assignment && m.deadline && !m.archived && !m.deleted_at)
-          .filter(m => {
-            const course = courses.find(c => c.id === m.course_id);
-            return courseMatchesUser(course);
-          })
-          .map(m => {
-            // Force Cairo/Local time end-of-day for date-only strings from DB
-            const deadlineStr = m.deadline!.includes("T") ? m.deadline! : `${m.deadline!}T23:59:59`;
-            const deadline = new Date(deadlineStr);
-            const hoursLeft = Math.floor((deadline.getTime() - now.getTime()) / (1000 * 60 * 60));
-            const minutesLeft = Math.floor((deadline.getTime() - now.getTime()) / (1000 * 60));
-            const course = courses.find(c => c.id === m.course_id);
-            return {
-              id: m.id,
-              title: m.title,
-              course: course ? (lang === "ar" ? course.name : course.code) : "",
-              hoursLeft,
-              minutesLeft
-            };
-          })
-          .filter(m => m.minutesLeft > 0 && m.minutesLeft <= 24 * 60)
-          .sort((a, b) => a.minutesLeft - b.minutesLeft);
-          
-        setUrgentAssignments(urgent);
-
-        // Find recent materials uploaded in the last 72 hours for the visitor's year & dept
-        const threeDaysAgo = new Date(Date.now() - 72 * 60 * 60 * 1000);
-        const recent = materials
-          .filter(m => !m.archived && !m.deleted_at && m.created_at && new Date(m.created_at) > threeDaysAgo)
-          .filter(m => {
-            const course = courses.find(c => c.id === m.course_id);
-            return courseMatchesUser(course);
-          })
-          .slice(0, 3)
-          .map(m => {
-            const course = courses.find(c => c.id === m.course_id);
-            return {
-              id: m.id,
-              title: m.pdf_display_name || m.title,
-              course: course ? (lang === "ar" ? course.name : course.code) : "",
-              courseId: m.course_id
-            };
-          });
-        setRecentUpdates(recent);
-      } catch (e) {
-        console.error("Failed to fetch announcements:", e);
-      }
+    const onDeptChange = () => {
+      setDeptContext(localStorage.getItem("cic_dept_context"));
     };
-
-    fetchData();
-    // Poll every 60s, but only while the tab is visible (saves network/battery)
-    const interval = setInterval(() => {
-      if (document.visibilityState === "visible") fetchData();
-    }, 60 * 1000);
-    const onVisible = () => { if (document.visibilityState === "visible") fetchData(); };
-    const onDeptChange = () => fetchData();
-    document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("cic-dept-change", onDeptChange);
-    return () => {
-      clearInterval(interval);
-      document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("cic-dept-change", onDeptChange);
+    return () => window.removeEventListener("cic-dept-change", onDeptChange);
+  }, []);
+
+  // Share React Query cache keys across the app so we don't re-scan D1 every 60s
+  const { data: rawAnnouncements = [] } = useQuery({
+    queryKey: ["announcements"],
+    queryFn: db.getAnnouncements,
+    staleTime: BANNER_STALE_MS,
+    refetchInterval: BANNER_POLL_MS,
+    refetchIntervalInBackground: false,
+  });
+  const { data: materials = [] } = useQuery({
+    queryKey: ["materials"],
+    queryFn: () => db.getMaterials(),
+    staleTime: BANNER_STALE_MS,
+    refetchInterval: BANNER_POLL_MS,
+    refetchIntervalInBackground: false,
+  });
+  const { data: courses = [] } = useQuery({
+    queryKey: ["courses"],
+    queryFn: db.getCourses,
+    staleTime: BANNER_STALE_MS,
+  });
+  const { data: departments = [] } = useQuery({
+    queryKey: ["departments"],
+    queryFn: db.getDepartments,
+    staleTime: 15 * 60 * 1000,
+  });
+
+  const { announcements, urgentAssignments, recentUpdates } = useMemo(() => {
+    const courseMatchesUser = (course?: Course | null) => {
+      if (!course) return false;
+      if (course.code === "BACHELOR-PROG") return false;
+
+      if (year && year !== "all" && (course.academic_year || "1") !== year) {
+        return false;
+      }
+
+      if (deptContext && deptContext !== "all" && course.department_id) {
+        const courseDept = departments.find(d => d.id === course.department_id);
+        if (courseDept) {
+          const isCs = courseDept.name_en === "CS";
+          if (deptContext === "cs" && !isCs) return false;
+          if (deptContext === "ai_cyber" && isCs) return false;
+          if (deptContext === "bachelor" && courseDept.name_en !== "Bachelor") return false;
+        }
+      }
+      return true;
     };
-  }, [lang, year]);
+
+    const filteredAnns = rawAnnouncements.filter(a => {
+      const yearMatch = !a.target_year || a.target_year === "all" || a.target_year === year;
+      const deptMatch = !a.target_dept || a.target_dept === "all" || a.target_dept === deptContext;
+      return yearMatch && deptMatch;
+    });
+
+    const now = new Date();
+    const urgent = materials
+      .filter(m => m.is_assignment && m.deadline && !m.archived && !m.deleted_at)
+      .filter(m => {
+        const course = courses.find(c => c.id === m.course_id);
+        return courseMatchesUser(course);
+      })
+      .map(m => {
+        const deadlineStr = m.deadline!.includes("T") ? m.deadline! : `${m.deadline!}T23:59:59`;
+        const deadline = new Date(deadlineStr);
+        const hoursLeft = Math.floor((deadline.getTime() - now.getTime()) / (1000 * 60 * 60));
+        const minutesLeft = Math.floor((deadline.getTime() - now.getTime()) / (1000 * 60));
+        const course = courses.find(c => c.id === m.course_id);
+        return {
+          id: m.id,
+          title: m.title,
+          course: course ? (lang === "ar" ? course.name : course.code) : "",
+          hoursLeft,
+          minutesLeft
+        };
+      })
+      .filter(m => m.minutesLeft > 0 && m.minutesLeft <= 24 * 60)
+      .sort((a, b) => a.minutesLeft - b.minutesLeft);
+
+    const threeDaysAgo = new Date(Date.now() - 72 * 60 * 60 * 1000);
+    const recent = materials
+      .filter(m => !m.archived && !m.deleted_at && m.created_at && new Date(m.created_at) > threeDaysAgo)
+      .filter(m => {
+        const course = courses.find(c => c.id === m.course_id);
+        return courseMatchesUser(course);
+      })
+      .slice(0, 3)
+      .map(m => {
+        const course = courses.find(c => c.id === m.course_id);
+        return {
+          id: m.id,
+          title: m.pdf_display_name || m.title,
+          course: course ? (lang === "ar" ? course.name : course.code) : "",
+          courseId: m.course_id
+        };
+      });
+
+    return {
+      announcements: filteredAnns,
+      urgentAssignments: urgent,
+      recentUpdates: recent,
+    };
+  }, [rawAnnouncements, materials, courses, departments, year, deptContext, lang]);
 
   const allItems = [
     ...urgentAssignments.map(a => ({

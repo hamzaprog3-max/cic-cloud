@@ -45,6 +45,7 @@ const YearCoursesPage = () => {
     queryKey: ["departments"],
     queryFn: db.getDepartments,
     initialData: fallbackDepartments,
+    initialDataUpdatedAt: 0,
   });
 
   const targetDeptId = deptId === "cs-dept-id" ? "9eaab1c7-37e2-44a4-afbe-738586d50835" : (deptId === "ai-cyber-dept-id" ? "ca4069a4-fc50-4e96-8fb7-c1f4ea67da4f" : deptId);
@@ -53,6 +54,7 @@ const YearCoursesPage = () => {
     queryKey: ["courses", "all"],
     queryFn: db.getCourses,
     initialData: fallbackCourses,
+    initialDataUpdatedAt: 0,
   });
 
   const baseCourses = targetDeptId

@@ -46,12 +46,14 @@ const YearDepartmentsPage = () => {
     queryKey: ["departments"],
     queryFn: db.getDepartments,
     initialData: fallbackDepartments,
+    initialDataUpdatedAt: 0,
   });
 
   const { data: allCourses = [] } = useQuery({
     queryKey: ["courses"],
     queryFn: db.getCourses,
     initialData: fallbackCourses,
+    initialDataUpdatedAt: 0,
   });
 
   const yearCourses = allCourses.filter(c => (c.academic_year || "1") === yearId);

@@ -22,7 +22,7 @@ const CoursePage = () => {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const { data: courses = [] } = useQuery({ queryKey: ["courses"], queryFn: db.getCourses, initialData: fallbackCourses });
+  const { data: courses = [] } = useQuery({ queryKey: ["courses"], queryFn: db.getCourses, initialData: fallbackCourses, initialDataUpdatedAt: 0 });
   
   const course = id
     ? courses.find(c => c.id === id)
@@ -32,6 +32,7 @@ const CoursePage = () => {
     queryKey: ["materials", course?.id], 
     queryFn: () => db.getMaterials(course?.id),
     initialData: course?.id ? fallbackMaterials.filter(m => m.course_id === course.id) : undefined,
+    initialDataUpdatedAt: 0,
     enabled: !!course?.id
   });
   
@@ -39,6 +40,7 @@ const CoursePage = () => {
     queryKey: ["material_categories"],
     queryFn: db.getCategories,
     initialData: fallbackCategories,
+    initialDataUpdatedAt: 0,
   });
 
   // Categories scoped to this course's department and academic year (unified + specific)

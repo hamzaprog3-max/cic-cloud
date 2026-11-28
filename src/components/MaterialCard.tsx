@@ -41,9 +41,13 @@ import { toast } from "sonner";
 import { useDesign } from "@/hooks/use-design";
 import {
   isCloudinaryVideoUrl,
+  isInlineStreamUrl,
   isOfflineCacheableUrl,
   isPlayableMediaUrl,
+  isSharePointOrOneDriveUrl,
+  isYouTubeUrl,
   parseCloudinaryVideo,
+  parseYouTubeUrl,
 } from "@/lib/cloudinary";
 
 const PdfViewerModal = lazy(() => import("@/components/PdfViewerModal"));
@@ -96,27 +100,45 @@ const MaterialCard = ({
       Date.now() - new Date(material.created_at).getTime() < 3 * 24 * 60 * 60 * 1000
   );
 
-  // Resolve Cloudinary stream URL (dedicated video_url OR legacy fallback in pdf_url / external_link)
-  const cloudinaryStreamUrl = useMemo(() => {
-    if (material.video_url && isCloudinaryVideoUrl(material.video_url)) return material.video_url;
-    if (material.video_url) return material.video_url;
-    if (material.pdf_url && isCloudinaryVideoUrl(material.pdf_url)) return material.pdf_url;
-    if (material.external_link && isCloudinaryVideoUrl(material.external_link)) return material.external_link;
-    return null;
-  }, [material.video_url, material.pdf_url, material.external_link]);
-
-  const parsedStream = useMemo(
-    () => (cloudinaryStreamUrl ? parseCloudinaryVideo(cloudinaryStreamUrl) : null),
-    [cloudinaryStreamUrl]
-  );
-
   const safePdfUrl = useMemo(() => normalizeLink(material.pdf_url), [material.pdf_url]);
   const safeExternalLink = useMemo(() => normalizeLink(material.external_link), [material.external_link]);
   const safeSubmissionLink = useMemo(() => normalizeLink(material.submission_link), [material.submission_link]);
 
-  // Don't duplicate pdf_url / external_link row if it IS the Cloudinary stream already shown in the stream card
-  const showPdfSection = Boolean(safePdfUrl && safePdfUrl !== cloudinaryStreamUrl);
-  const showExternalSection = Boolean(safeExternalLink && safeExternalLink !== cloudinaryStreamUrl);
+  // Resolve inline stream URL: YouTube OR Cloudinary OR explicit video_url (excluding SharePoint web pages)
+  const cloudinaryStreamUrl = useMemo(() => {
+    const candidates = [material.video_url, safePdfUrl, safeExternalLink];
+    for (const u of candidates) {
+      if (u && isInlineStreamUrl(u)) return u;
+    }
+    if (material.video_url && !isSharePointOrOneDriveUrl(material.video_url)) {
+      return material.video_url;
+    }
+    return null;
+  }, [material.video_url, safePdfUrl, safeExternalLink]);
+
+  const parsedStream = useMemo(
+    () => (cloudinaryStreamUrl ? parseCloudinaryVideo(cloudinaryStreamUrl, { allowYouTube: true, allowSharePoint: false }) : null),
+    [cloudinaryStreamUrl]
+  );
+
+  // Detect SharePoint / Microsoft Teams recording URL (stored in video_url, pdf_url, or external_link)
+  const sharePointVideoUrl = useMemo(() => {
+    if (material.video_url && isSharePointOrOneDriveUrl(material.video_url)) return material.video_url;
+    if (safePdfUrl && isSharePointOrOneDriveUrl(safePdfUrl)) return safePdfUrl;
+    return null;
+  }, [material.video_url, safePdfUrl]);
+
+  // Don't duplicate pdf_url / external_link row if it IS the inline stream (YouTube/Cloudinary) or SharePoint recording
+  const showPdfSection = Boolean(
+    safePdfUrl &&
+      safePdfUrl !== cloudinaryStreamUrl &&
+      safePdfUrl !== sharePointVideoUrl
+  );
+  const showExternalSection = Boolean(
+    safeExternalLink &&
+      safeExternalLink !== cloudinaryStreamUrl &&
+      safeExternalLink !== sharePointVideoUrl
+  );
 
   const [pdfViewerOpen, setPdfViewerOpen] = useState(false);
   const [videoViewerUrl, setVideoViewerUrl] = useState<string | null>(null);
@@ -145,7 +167,11 @@ const MaterialCard = ({
 
   const editVideoValidation = useMemo(() => {
     if (!editVideoUrl.trim()) return null;
-    return parseCloudinaryVideo(editVideoUrl, { requireCloudinary: true });
+    return parseCloudinaryVideo(editVideoUrl, {
+      requireCloudinary: false,
+      allowYouTube: true,
+      allowSharePoint: true,
+    });
   }, [editVideoUrl]);
 
   const copyListContent = (e: React.MouseEvent) => {
@@ -164,9 +190,36 @@ const MaterialCard = ({
       return (
         <div key={i} className="mb-2 last:mb-0 min-h-[1.5rem]">
           {parts.map((part, j) => {
-            if (urlRegex.test(part)) {
+            if (/^https?:\/\//i.test(part)) {
               const safeHref = normalizeLink(part);
               if (safeHref) {
+                if (isYouTubeUrl(safeHref) || isPlayableMediaUrl(safeHref)) {
+                  return (
+                    <span key={j} className="inline-flex items-center gap-1.5 flex-wrap align-middle">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          playClickSfx();
+                          setVideoViewerUrl(safeHref);
+                        }}
+                        className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-primary/12 hover:bg-primary/20 text-primary font-semibold text-xs transition-colors cursor-pointer"
+                      >
+                        <PlayCircle className="w-3.5 h-3.5 shrink-0" />
+                        <span>{isYouTubeUrl(safeHref) ? (lang === "ar" ? "تشغيل يوتيوب" : "Play YouTube") : (lang === "ar" ? "تشغيل الفيديو" : "Play Video")}</span>
+                      </button>
+                      <a
+                        href={safeHref}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-muted-foreground hover:text-primary hover:underline break-all text-xs"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {part}
+                      </a>
+                    </span>
+                  );
+                }
                 return (
                   <a
                     key={j}
@@ -193,7 +246,7 @@ const MaterialCard = ({
     setEditTitle(material.title);
     setEditCourseId(material.course_id);
     setEditCategoryId(material.category_id || "");
-    setEditVideoUrl(material.video_url || (cloudinaryStreamUrl || ""));
+    setEditVideoUrl(material.video_url || cloudinaryStreamUrl || sharePointVideoUrl || "");
     setEditExternalLink(material.external_link || "");
     setEditSubmissionLink(material.submission_link || "");
     setEditDeadline(material.deadline ? material.deadline.slice(0, 16) : "");
@@ -214,9 +267,13 @@ const MaterialCard = ({
 
     let finalVideoUrl: string | null = null;
     if (editVideoUrl.trim()) {
-      const parsedVal = parseCloudinaryVideo(editVideoUrl, { requireCloudinary: true });
+      const parsedVal = parseCloudinaryVideo(editVideoUrl, {
+        requireCloudinary: false,
+        allowYouTube: true,
+        allowSharePoint: true,
+      });
       if (!parsedVal.isValid) {
-        toast.error(parsedVal.error || (lang === "ar" ? "رابط Cloudinary غير صالح" : "Invalid Cloudinary URL"));
+        toast.error(parsedVal.error || (lang === "ar" ? "رابط الفيديو غير صالح" : "Invalid video URL"));
         return;
       }
       finalVideoUrl = parsedVal.normalizedUrl;
@@ -358,6 +415,7 @@ const MaterialCard = ({
     isRecent ||
       material.is_reference ||
       cloudinaryStreamUrl ||
+      sharePointVideoUrl ||
       material.is_assignment ||
       (material.section_number && material.section_number !== "all")
   );
@@ -431,9 +489,23 @@ const MaterialCard = ({
         </span>
       )}
       {cloudinaryStreamUrl && (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-500/12 text-indigo-600 dark:text-indigo-400">
-          <Radio className="w-2.5 h-2.5" />
-          {t("admin.streamBadge")}
+        <span
+          className={
+            parsedStream?.isYouTube
+              ? "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-500/12 text-red-600 dark:text-red-400"
+              : "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-500/12 text-indigo-600 dark:text-indigo-400"
+          }
+        >
+          <PlayCircle className="w-2.5 h-2.5" />
+          {parsedStream?.isYouTube
+            ? parsedStream.streamTypeLabel[lang === "ar" ? "ar" : "en"]
+            : t("admin.streamBadge")}
+        </span>
+      )}
+      {sharePointVideoUrl && !cloudinaryStreamUrl && (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-sky-500/12 text-sky-600 dark:text-sky-400">
+          <PlayCircle className="w-2.5 h-2.5" />
+          {lang === "ar" ? "تسجيل Teams" : "Teams Recording"}
         </span>
       )}
       {material.is_assignment && (
@@ -487,14 +559,22 @@ const MaterialCard = ({
             )}
             <div className="absolute inset-0 bg-black/35" />
             <div className="absolute inset-0 flex items-center justify-center">
-              <span className="w-14 h-14 rounded-full bg-white/90 text-[#1d1d1f] flex items-center justify-center shadow-2xl group-hover/vid:scale-110 transition-transform">
+              <span
+                className={`w-14 h-14 rounded-full flex items-center justify-center shadow-2xl group-hover/vid:scale-110 transition-transform ${
+                  parsedStream.isYouTube
+                    ? "bg-red-600 text-white"
+                    : "bg-white/90 text-[#1d1d1f]"
+                }`}
+              >
                 <Play className="w-6 h-6 fill-current ms-0.5" />
               </span>
             </div>
             <div className="absolute bottom-2.5 inset-x-3 flex items-center justify-between gap-2 text-white">
               <span className="inline-flex items-center gap-1.5 text-xs font-semibold">
                 <PlayCircle className="w-4 h-4 text-[#64d2ff]" />
-                {t("admin.watchStream")}
+                {parsedStream.isYouTube
+                  ? (lang === "ar" ? "تشغيل داخل المنصة" : "Play Video")
+                  : t("admin.watchStream")}
               </span>
               <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-black/55 backdrop-blur-md border border-white/15">
                 {parsedStream.streamTypeLabel[lang === "ar" ? "ar" : "en"]}
@@ -740,7 +820,60 @@ const MaterialCard = ({
 
               {openViewerButton}
 
-              {pdfAction && safePdfUrl && (
+              {cloudinaryStreamUrl && parsedStream?.isValid && (
+                <>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      playClickSfx();
+                      setVideoViewerUrl(cloudinaryStreamUrl);
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-primary/12 hover:bg-primary/20 text-primary font-semibold transition-colors mac-cursor"
+                  >
+                    <PlayCircle className="w-3.5 h-3.5" />
+                    <span>
+                      {parsedStream.isYouTube
+                        ? (lang === "ar" ? "تشغيل يوتيوب" : "Watch YouTube")
+                        : (lang === "ar" ? "تشغيل الفيديو" : "Play Video")}
+                    </span>
+                  </button>
+                  {parsedStream.isYouTube && (
+                    <a
+                      href={parseYouTubeUrl(cloudinaryStreamUrl)?.watchUrl || cloudinaryStreamUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        playClickSfx();
+                      }}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-secondary/80 hover:bg-secondary text-foreground/80 font-medium transition-colors mac-cursor"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>{lang === "ar" ? "فتح في يوتيوب" : "YouTube"}</span>
+                    </a>
+                  )}
+                </>
+              )}
+
+              {sharePointVideoUrl && (
+                <a
+                  href={sharePointVideoUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    playClickSfx();
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-primary/12 hover:bg-primary/20 text-primary font-semibold transition-colors mac-cursor"
+                >
+                  <PlayCircle className="w-3.5 h-3.5" />
+                  <span>{lang === "ar" ? "تشغيل تسجيل Teams / SharePoint" : "Watch Teams Recording"}</span>
+                  <ExternalLink className="w-3 h-3 opacity-75" />
+                </a>
+              )}
+
+              {pdfAction && safePdfUrl && (pdfAction.isSupabaseDoc || pdfAction.isVideo || isOfflineCacheableUrl(safePdfUrl)) && (
                 <>
                   <button
                     type="button"
@@ -855,7 +988,60 @@ const MaterialCard = ({
 
                 {openViewerButton}
 
-                {pdfAction && safePdfUrl && (
+                {cloudinaryStreamUrl && parsedStream?.isValid && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        playClickSfx();
+                        setVideoViewerUrl(cloudinaryStreamUrl);
+                      }}
+                      className="flex items-center gap-1.5 text-xs text-primary hover:bg-primary/15 px-2.5 py-1 bg-primary/10 rounded-full font-semibold transition-all cursor-pointer"
+                    >
+                      <PlayCircle className="w-3.5 h-3.5" />
+                      <span>
+                        {parsedStream.isYouTube
+                          ? (lang === "ar" ? "تشغيل يوتيوب" : "Watch YouTube")
+                          : (lang === "ar" ? "تشغيل الفيديو" : "Play Video")}
+                      </span>
+                    </button>
+                    {parsedStream.isYouTube && (
+                      <a
+                        href={parseYouTubeUrl(cloudinaryStreamUrl)?.watchUrl || cloudinaryStreamUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          playClickSfx();
+                        }}
+                        className="flex items-center gap-1 text-muted-foreground hover:text-primary hover:underline cursor-pointer"
+                      >
+                        <ExternalLink className="w-3 h-3" />
+                        <span>{lang === "ar" ? "فتح في يوتيوب" : "YouTube"}</span>
+                      </a>
+                    )}
+                  </>
+                )}
+
+                {sharePointVideoUrl && (
+                  <a
+                    href={sharePointVideoUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      playClickSfx();
+                    }}
+                    className="flex items-center gap-1.5 text-xs text-primary hover:bg-primary/15 px-2.5 py-1 bg-primary/10 rounded-full font-semibold transition-all cursor-pointer"
+                  >
+                    <PlayCircle className="w-3.5 h-3.5" />
+                    <span>{lang === "ar" ? "تشغيل تسجيل Teams / SharePoint" : "Watch Teams Recording"}</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                )}
+
+                {pdfAction && safePdfUrl && (pdfAction.isSupabaseDoc || pdfAction.isVideo || isOfflineCacheableUrl(safePdfUrl)) && (
                   <>
                     <button
                       type="button"
