@@ -196,6 +196,23 @@ function isYouTubeHref(url: string): boolean {
   return /^https?:\/\/(?:(?:www|m)\.)?(?:youtube\.com|youtu\.be)\//i.test(url);
 }
 
+function isSharePointHref(url: string): boolean {
+  return /^https?:\/\/[^/]*(?:sharepoint\.com|1drv\.ms|onedrive\.live\.com|stream\.microsoft\.com)\//i.test(url);
+}
+
+function stripOuterNumbers(norm: string): string {
+  return norm.replace(/^\d+\s+/, "").replace(/\s+\d+$/, "").trim();
+}
+
+function wordOverlapRatio(a: string, b: string): number {
+  const wa = new Set(a.split(/\s+/).filter((w) => w.length >= 2));
+  const wb = new Set(b.split(/\s+/).filter((w) => w.length >= 2));
+  if (wa.size < 3 || wb.size < 3) return 0;
+  let shared = 0;
+  for (const w of wa) if (wb.has(w)) shared++;
+  return shared / Math.max(wa.size, wb.size);
+}
+
 interface ParsedMoodleActivity {
   cmid: string;
   modType: "resource" | "folder" | "url" | "quiz" | "assign";
@@ -351,6 +368,9 @@ function classifyMoodleItem(opts: {
 
   // External tutorials / online video links
   if (opts.modType === "url") {
+    if (opts.resolvedUrl && isSharePointHref(opts.resolvedUrl)) {
+      return { categoryId: CAT_IDS.RECORDINGS, isReference: false, isAssignment: false };
+    }
     if (opts.resolvedUrl && isYouTubeHref(opts.resolvedUrl)) {
       return { categoryId: CAT_IDS.EXTERNAL, isReference: false, isAssignment: false };
     }
@@ -392,11 +412,12 @@ function findExistingMaterialMatch(
     }
 
     // Never match a downloadable resource file against a link-only entry (no pdf_url),
-    // nor a Moodle external URL against an uploaded R2 file unless URL matched above.
+    // nor a non-document URL (Teams/YouTube/tutorial) against an uploaded R2 file unless URL matched above.
     const existingHasR2File = typeof m.pdf_url === "string" && m.pdf_url.includes("r2.dev/");
     const existingIsLinkOnly = !m.pdf_url;
+    const candIsDriveOrDocUrl = Boolean(candidate.resolvedUrl && /drive\.google\.com|\.pdf(\?|$)/i.test(candidate.resolvedUrl));
     if ((candidate.modType === "resource" || candidate.modType === "folder") && existingIsLinkOnly) continue;
-    if (candidate.modType === "url" && existingHasR2File) continue;
+    if (candidate.modType === "url" && existingHasR2File && !candIsDriveOrDocUrl) continue;
 
     // Never mix "On line" video/web links with offline PDF slides, or "Updated" with non-updated
     const matIsOnline = /\bon\s*line\b/i.test(String(m.title || ""));
@@ -404,7 +425,7 @@ function findExistingMaterialMatch(
     const matIsUpdated = /\bupdated\b/i.test(String(m.title || ""));
     if (candIsUpdated && !matIsUpdated) continue;
 
-    // 2. Exact normalized title or filename match (require BOTH sides >= 6 chars for substring match!)
+    // 2. Exact normalized title, stripped-number title, word-overlap (handles 1-letter typos), or filename match
     const mTitle = normalizeForCompare(String(m.title || ""));
     const mDisp = normalizeForCompare(String(m.pdf_display_name || ""));
     let mR2Stem = "";
@@ -414,6 +435,16 @@ function findExistingMaterialMatch(
     }
 
     if (candNormTitle && (candNormTitle === mTitle || candNormTitle === mDisp)) return m;
+    const candStripped = stripOuterNumbers(candNormTitle);
+    const matStripped = stripOuterNumbers(mTitle);
+    if (candStripped.length >= 8 && matStripped.length >= 8 && candStripped === matStripped) {
+      return m;
+    }
+    if (wordOverlapRatio(candNormTitle, mTitle) >= 0.75) {
+      const candTrailNum = candNormTitle.match(/(\d+)$/)?.[1] || "";
+      const matTrailNum = mTitle.match(/(\d+)$/)?.[1] || "";
+      if (candTrailNum === matTrailNum) return m;
+    }
     if (
       candNormFile &&
       candNormFile.length >= 6 &&
@@ -1052,8 +1083,8 @@ export async function runMoodleSync(
               modType: "url",
               resolvedUrl,
             });
-            const isYt = isYouTubeHref(resolvedUrl);
-            const isDriveOrFile = /drive\.google\.com|\.pdf(\?|$)/i.test(resolvedUrl);
+            const isYtOrSp = isYouTubeHref(resolvedUrl) || isSharePointHref(resolvedUrl);
+            const isDriveOrFile = !isYtOrSp && /drive\.google\.com|\.pdf(\?|$)/i.test(resolvedUrl);
             const materialId = crypto.randomUUID();
             const nowIso = new Date().toISOString();
 
@@ -1072,10 +1103,10 @@ export async function runMoodleSync(
                 cls.categoryId,
                 isDriveOrFile ? resolvedUrl : null,
                 isDriveOrFile ? act.title : null,
-                !isYt && !isDriveOrFile ? resolvedUrl : null,
+                !isYtOrSp && !isDriveOrFile ? resolvedUrl : null,
                 cls.isAssignment ? 1 : 0,
                 cls.isReference ? 1 : 0,
-                isYt ? resolvedUrl : null,
+                isYtOrSp ? resolvedUrl : null,
                 nowIso
               )
               .run();
