@@ -373,12 +373,15 @@ function findExistingMaterialMatch(
     title: string;
     fileName?: string | null;
     cmid: string;
+    modType?: string;
     sourceUrl?: string | null;
     resolvedUrl?: string | null;
   }
 ): Record<string, any> | null {
   const candNormTitle = normalizeForCompare(candidate.title);
   const candNormFile = candidate.fileName ? normalizeForCompare(candidate.fileName) : "";
+  const candIsOnline = /\bon\s*line\b/i.test(candidate.title);
+  const candIsUpdated = /\bupdated\b/i.test(candidate.title);
 
   for (const m of existingMaterials) {
     // 1. Exact URL / Moodle CMID match
@@ -388,18 +391,39 @@ function findExistingMaterialMatch(
       if (u.includes(`view.php?id=${candidate.cmid}`)) return m;
     }
 
-    // 2. Exact normalized title or filename match
+    // Never match a downloadable resource file against a link-only entry (no pdf_url),
+    // nor a Moodle external URL against an uploaded R2 file unless URL matched above.
+    const existingHasR2File = typeof m.pdf_url === "string" && m.pdf_url.includes("r2.dev/");
+    const existingIsLinkOnly = !m.pdf_url;
+    if ((candidate.modType === "resource" || candidate.modType === "folder") && existingIsLinkOnly) continue;
+    if (candidate.modType === "url" && existingHasR2File) continue;
+
+    // Never mix "On line" video/web links with offline PDF slides, or "Updated" with non-updated
+    const matIsOnline = /\bon\s*line\b/i.test(String(m.title || ""));
+    if (candIsOnline !== matIsOnline) continue;
+    const matIsUpdated = /\bupdated\b/i.test(String(m.title || ""));
+    if (candIsUpdated && !matIsUpdated) continue;
+
+    // 2. Exact normalized title or filename match (require BOTH sides >= 6 chars for substring match!)
     const mTitle = normalizeForCompare(String(m.title || ""));
     const mDisp = normalizeForCompare(String(m.pdf_display_name || ""));
     let mR2Stem = "";
-    if (typeof m.pdf_url === "string" && m.pdf_url.includes("r2.dev/")) {
-      const key = m.pdf_url.split("/").pop() || "";
+    if (existingHasR2File) {
+      const key = String(m.pdf_url).split("/").pop() || "";
       mR2Stem = normalizeForCompare(key.replace(/^\d+-/, ""));
     }
 
     if (candNormTitle && (candNormTitle === mTitle || candNormTitle === mDisp)) return m;
-    if (candNormFile && candNormFile.length >= 6 && (candNormFile === mR2Stem || (mR2Stem && (mR2Stem.includes(candNormFile) || candNormFile.includes(mR2Stem))))) {
-      return m;
+    if (
+      candNormFile &&
+      candNormFile.length >= 6 &&
+      mR2Stem.length >= 6 &&
+      (candNormFile === mR2Stem || mR2Stem.includes(candNormFile) || candNormFile.includes(mR2Stem))
+    ) {
+      // Guard against numbered suffixes like "polymorphism2" matching "polymorphism"
+      const candTrailNum = candNormTitle.match(/(\d+)$/)?.[1] || "";
+      const matTrailNum = mTitle.match(/(\d+)$/)?.[1] || "";
+      if (candTrailNum === matTrailNum) return m;
     }
 
     // 3. Token overlap check for Arabic/English Lecture/Chapter/Unit/Lab/Section numbering
@@ -411,14 +435,13 @@ function findExistingMaterialMatch(
     const candAll = `${candidate.title} ${candidate.fileName || ""}`;
     const matAll = `${m.title || ""} ${m.pdf_display_name || ""} ${mR2Stem}`;
     if (
-      (checkNumPair(/(?:lecture|lec|unit|ch(?:apter)?)\s*\.?\s*0*(\d+)/i, candAll, matAll) &&
+      (checkNumPair(/(?:lecture|lec|unit|ch(?:apter)?)\s*\.?\s*0*(\d+)\b/i, candAll, matAll) &&
         !/(?:section|sec|lab|sheet|quiz|answer|recording|تسجيل)/i.test(candAll) &&
         !/(?:section|sec|lab|sheet|quiz|answer|recording|تسجيل)/i.test(matAll)) ||
-      (checkNumPair(/(?:section|sec|lab)\s*\.?\s*0*(\d+)/i, candAll, matAll) &&
+      (checkNumPair(/(?:section|sec|lab)\s*\.?\s*0*(\d+)\b/i, candAll, matAll) &&
         !/(?:sheet|quiz|answer|assignment)/i.test(candAll) &&
         !/(?:sheet|quiz|answer|assignment)/i.test(matAll))
     ) {
-      // Extra guard: if both have descriptive words beyond the number, ensure no conflict like "part 2"
       const aPart = candAll.match(/part\s*0*(\d+)/i)?.[1];
       const bPart = matAll.match(/part\s*0*(\d+)/i)?.[1];
       if (aPart === bPart) return m;
@@ -723,6 +746,7 @@ export async function runMoodleSync(
       title: params.title,
       fileName: decodedName,
       cmid: params.cmid,
+      modType: params.modType,
       sourceUrl: params.pluginFileUrl,
     });
     if (existing) {
@@ -901,6 +925,7 @@ export async function runMoodleSync(
             const preMatch = findExistingMaterialMatch(existingMaterials, {
               title: act.title,
               cmid: act.cmid,
+              modType: "resource",
               sourceUrl: act.url,
             });
             if (preMatch) {
@@ -1005,6 +1030,7 @@ export async function runMoodleSync(
             const existing = findExistingMaterialMatch(existingMaterials, {
               title: act.title,
               cmid: act.cmid,
+              modType: "url",
               sourceUrl: act.url,
               resolvedUrl,
             });
